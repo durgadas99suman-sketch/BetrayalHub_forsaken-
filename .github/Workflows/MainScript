@@ -1,0 +1,4015 @@
+print("BetrayalHub Custom loading...")
+
+local SCRIPT_VERSION = "v4.0.2"
+
+-- ============================================================
+-- UI MIGRATION NOTE (WindUI → Fluent Modded)
+-- ============================================================
+-- The interface layer was migrated from WindUI to Fluent
+-- (Modded-compatible API). All gameplay logic, state tables,
+-- callbacks, loops, connections and bug fixes are preserved
+-- verbatim — only the UI construction changed.
+-- NEW: Space Theme Engine + "Appearance" tab (theme presets,
+-- accent colors, transparency) with automatic persistence.
+-- ============================================================
+
+-- ============================================================
+-- ERROR HANDLER
+-- ============================================================
+local function flashError(msg)
+    pcall(function()
+        local player = game:GetService("Players").LocalPlayer
+        local gui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", 5)
+        if not gui then return end
+        local errorGui = Instance.new("ScreenGui")
+        errorGui.Name = "BetrayalHub_Error"
+        errorGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        errorGui.Parent = gui
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 450, 0, 80)
+        frame.Position = UDim2.new(0.5, -225, 0.5, -40)
+        frame.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
+        frame.BackgroundTransparency = 0.2
+        frame.BorderSizePixel = 2
+        frame.BorderColor3 = Color3.fromRGB(255, 50, 50)
+        frame.Parent = errorGui
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 8)
+        corner.Parent = frame
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -20, 1, -20)
+        label.Position = UDim2.new(0, 10, 0, 10)
+        label.Text = "⚠️ BetrayalHub Error:\n" .. tostring(msg):sub(1, 150)
+        label.TextColor3 = Color3.fromRGB(255, 200, 200)
+        label.TextScaled = true
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamBold
+        label.Parent = frame
+        task.delay(10, function() pcall(function() errorGui:Destroy() end) end)
+    end)
+end
+
+local success, err = pcall(function()
+
+-- ============================================================
+-- FORWARD DECLARATIONS
+-- Required because oldNamecall (section 4) references tt and
+-- activeBackstabConn which are assigned in section 5.
+-- Lua closures close over the upvalue slot, not the value —
+-- so assigning later is fine as long as no call fires before
+-- section 5 runs (it won't; the game hasn't started yet).
+-- ============================================================
+local tt                    -- assigned in section 5
+local activeBackstabConn    -- assigned in section 5
+local doTriggerFlash        -- defined in section 6 HUD block
+local staminaEstimate       -- defined in section 7 Helper block
+local helper                -- defined in section 7 Helper block
+local elliotAim             -- assigned in section 4a Elliot Predictive Aimbot
+
+-- ============================================================
+-- SERVICES & LOCAL PLAYER
+-- ============================================================
+local svc = {
+    Players = game:GetService("Players"),
+    Run     = game:GetService("RunService"),
+    RS      = game:GetService("ReplicatedStorage"),
+    WS      = game:GetService("Workspace"),
+    VIM     = game:GetService("VirtualInputManager"),
+    Stats   = game:GetService("Stats"),
+    Input   = game:GetService("UserInputService"),
+}
+local lp = svc.Players.LocalPlayer
+
+-- ── Helpers ──────────────────────────────────────────────────
+local function ensureTouchGuiVisible()
+    pcall(function()
+        local pg = lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local tg = pg:FindFirstChild("TouchGui")
+        if tg then
+            tg.Enabled = true
+            local frame = tg:FindFirstChild("TouchControlFrame")
+            if frame then frame.Visible = true end
+        end
+    end)
+end
+
+local function getRemoteEvent()
+    local ok, re = pcall(function()
+        return svc.RS.Modules.Network.Network:FindFirstChild("RemoteEvent")
+    end)
+    return ok and re or nil
+end
+
+local function getTeamFolder(name)
+    local root = svc.WS:FindFirstChild("Players")
+    return root and root:FindFirstChild(name)
+end
+
+-- ============================================================
+-- FLUENT MODDED LOADER  (replaces the WindUI loader)
+-- Official Fluent build — Fluent Modded forks are drop-in
+-- API compatible; swap the URL below for your preferred fork.
+-- ============================================================
+local Fluent
+
+local function tryLoadUI(url)
+    local ok, src = pcall(game.HttpGet, game, url)
+    if not (ok and src and #src > 100) then return nil end
+    local lok, fn = pcall(loadstring, src)
+    if not (lok and fn) then return nil end
+    local iok, inst = pcall(fn)
+    return (iok and inst) or nil
+end
+
+Fluent = tryLoadUI("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua")
+     or tryLoadUI("https://raw.githubusercontent.com/dawid-scripts/Fluent/main/main.lua")
+
+if not Fluent then error("Failed to load Fluent (Modded) library.") end
+
+local Options = Fluent.Options
+
+-- ── Window (replaces WindUI CreateWindow + SetToggleKey) ──────
+local win = Fluent:CreateWindow({
+    Title       = "BetrayalHub",
+    SubTitle    = "Custom Edition " .. SCRIPT_VERSION .. "  ·  🌌 Space Command",
+    TabWidth    = 132,
+    Size        = UDim2.fromOffset(540, 500),
+    Acrylic     = true,            -- acrylic / blur transparency effect
+    Theme       = "Dark",          -- base theme; recolored by the Space Theme Engine
+    MinimizeKey = Enum.KeyCode.L,  -- was win:SetToggleKey(Enum.KeyCode.L)
+})
+
+-- ============================================================
+-- SPACE THEME ENGINE
+-- Recolors the Fluent window into a galaxy command-center
+-- palette. Operates purely through Roblox instance properties
+-- (no Fluent internals are touched), so theme changes can
+-- never affect feature callbacks or gameplay logic.
+-- ============================================================
+local THEME = {
+    preset       = "Deep Space",
+    accent       = Color3.fromRGB(0, 195, 255),   -- 🔵 cyan primary
+    accent2      = Color3.fromRGB(155, 89, 255),  -- 🟣 purple secondary
+    bgTint       = Color3.fromRGB(9, 11, 28),     -- 🌌 deep-space navy
+    bgStrength   = 0.55,
+    transparency = 0.06,
+}
+
+local THEME_PRESETS = {
+    ["Deep Space"]    = { accent = Color3.fromRGB(0, 195, 255),  accent2 = Color3.fromRGB(155, 89, 255), bgTint = Color3.fromRGB(9, 11, 28),  bgStrength = 0.55, transparency = 0.06 },
+    ["Neon Blue"]     = { accent = Color3.fromRGB(0, 140, 255),  accent2 = Color3.fromRGB(0, 230, 255),  bgTint = Color3.fromRGB(7, 14, 30),  bgStrength = 0.60, transparency = 0.08 },
+    ["Cosmic Purple"] = { accent = Color3.fromRGB(170, 85, 255), accent2 = Color3.fromRGB(255, 80, 200), bgTint = Color3.fromRGB(16, 8, 30),  bgStrength = 0.58, transparency = 0.07 },
+    ["Void"]          = { accent = Color3.fromRGB(120, 130, 190), accent2 = Color3.fromRGB(190, 90, 255), bgTint = Color3.fromRGB(4, 4, 8),   bgStrength = 0.65, transparency = 0.10 },
+    ["Nebula"]        = { accent = Color3.fromRGB(255, 70, 200), accent2 = Color3.fromRGB(0, 225, 215),  bgTint = Color3.fromRGB(18, 7, 26),  bgStrength = 0.55, transparency = 0.07 },
+}
+
+local PRESET_DISPLAY = {
+    ["Deep Space"]    = "🌌 Deep Space",
+    ["Neon Blue"]     = "🚀 Neon Blue",
+    ["Cosmic Purple"] = "🟣 Cosmic Purple",
+    ["Void"]          = "🌑 Void",
+    ["Nebula"]        = "☄️ Nebula",
+}
+local DISPLAY_TO_PRESET = {}
+for key, display in pairs(PRESET_DISPLAY) do
+    DISPLAY_TO_PRESET[display] = key
+end
+
+local themeEngine = {
+    gui            = nil,
+    snapshot       = setmetatable({}, { __mode = "k" }),  -- weak keys: no leaks
+    applyScheduled = false,
+    lastApply      = 0,
+    saveScheduled  = false,
+}
+
+-- Role detection: dark → background, bright+saturated → accent,
+-- bright+neutral → text, everything else → mid (trim/borders).
+local function colorRole(c)
+    local r, g, b = c.R, c.G, c.B
+    local max = math.max(r, g, b)
+    local min = math.min(r, g, b)
+    local v = max
+    local d = max - min
+    local s = (max <= 0) and 0 or (d / max)
+    if v <= 0.28 then return "background" end
+    if s >= 0.28 and v >= 0.45 then return "accent" end
+    if v >= 0.62 and s <= 0.25 then return "text" end
+    return "mid"
+end
+
+local function mapColor(c)
+    local role = colorRole(c)
+    if role == "accent" then
+        return THEME.accent
+    elseif role == "background" then
+        return c:Lerp(THEME.bgTint, THEME.bgStrength)
+    elseif role == "mid" then
+        return c:Lerp(THEME.accent2, 0.35)   -- subtle purple sci-fi trim
+    elseif role == "text" then
+        return c:Lerp(THEME.accent, 0.08)    -- faint cyan cast on text
+    end
+    return c
+end
+
+-- Snapshot each instance's ORIGINAL colors the first time we see
+-- it, so repeated theme applications never drift or compound.
+local function snapshotInstance(obj)
+    local snap = themeEngine.snapshot[obj]
+    if snap then return snap end
+    snap = {}
+    pcall(function()
+        if obj:IsA("GuiObject") then
+            snap.bg = obj.BackgroundColor3
+            snap.trans = obj.BackgroundTransparency
+        end
+        if obj:IsA("TextLabel") or obj:IsA("TextBox") or obj:IsA("TextButton") then
+            snap.text = obj.TextColor3
+        end
+        if obj:IsA("UIStroke") then
+            snap.stroke = obj.Color
+        end
+        if obj:IsA("UIGradient") then
+            snap.gradient = obj.Color
+        end
+    end)
+    themeEngine.snapshot[obj] = snap
+    return snap
+end
+
+local function applyThemePass()
+    local root = themeEngine.gui
+    if not root then return end
+    for _, obj in ipairs(root:GetDescendants()) do
+        pcall(function()
+            local snap = snapshotInstance(obj)
+            if snap.bg then
+                obj.BackgroundColor3 = mapColor(snap.bg)
+                if snap.trans and snap.trans < 0.40 and colorRole(snap.bg) == "background" then
+                    obj.BackgroundTransparency = math.clamp(snap.trans + THEME.transparency, snap.trans, 0.42)
+                end
+            end
+            if snap.text then
+                obj.TextColor3 = mapColor(snap.text)
+            end
+            if snap.stroke then
+                obj.Color = mapColor(snap.stroke)
+            end
+            if snap.gradient then
+                local keypoints = {}
+                for _, kp in ipairs(snap.gradient.Keypoints) do
+                    table.insert(keypoints, ColorSequenceKeypoint.new(kp.Time, mapColor(kp.Value)))
+                end
+                obj.Color = ColorSequence.new(keypoints)
+            end
+        end)
+    end
+end
+
+-- Throttled apply (max ~5/sec) so slider drags stay smooth and
+-- dynamically-created elements (notifications, dropdown lists)
+-- also get themed via the DescendantAdded hook.
+local function scheduleApply()
+    if themeEngine.applyScheduled then return end
+    themeEngine.applyScheduled = true
+    task.defer(function()
+        local wait = 0.2 - (os.clock() - themeEngine.lastApply)
+        if wait > 0 then task.wait(wait) end
+        applyThemePass()
+        themeEngine.lastApply = os.clock()
+        themeEngine.applyScheduled = false
+    end)
+end
+
+local function findThemeGui()
+    local containers = {}
+    pcall(function() table.insert(containers, game:GetService("CoreGui")) end)
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    if pg then table.insert(containers, pg) end
+    -- 1) Preferred: the ScreenGui containing our window title
+    for _, container in ipairs(containers) do
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("ScreenGui") then
+                for _, d in ipairs(child:GetDescendants()) do
+                    if (d:IsA("TextLabel") or d:IsA("TextButton"))
+                       and type(d.Text) == "string" and d.Text:find("BetrayalHub", 1, true) then
+                        return child
+                    end
+                end
+            end
+        end
+    end
+    -- 2) Fallback: ScreenGui named "Fluent"
+    for _, container in ipairs(containers) do
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("ScreenGui") and child.Name == "Fluent" then
+                return child
+            end
+        end
+    end
+    return nil
+end
+
+local function initThemeEngine()
+    if themeEngine.gui then return end
+    themeEngine.gui = findThemeGui()
+    if not themeEngine.gui then return end
+    pcall(function()
+        themeEngine.gui.DescendantAdded:Connect(function() scheduleApply() end)
+    end)
+    applyThemePass()
+    themeEngine.lastApply = os.clock()
+end
+
+-- ── Theme persistence (executor filesystem, fully guarded) ────
+local THEME_FILE = "BetrayalHub/Theme.json"
+
+local function scheduleThemeSave()
+    if themeEngine.saveScheduled then return end
+    themeEngine.saveScheduled = true
+    task.delay(1.5, function()
+        themeEngine.saveScheduled = false
+        pcall(function()
+            if type(writefile) ~= "function" then return end
+            if type(isfolder) == "function" and type(makefolder) == "function" then
+                if not isfolder("BetrayalHub") then pcall(makefolder, "BetrayalHub") end
+            end
+            local Http = game:GetService("HttpService")
+            writefile(THEME_FILE, Http:JSONEncode({
+                preset       = THEME.preset,
+                accent       = { THEME.accent.R,  THEME.accent.G,  THEME.accent.B  },
+                accent2      = { THEME.accent2.R, THEME.accent2.G, THEME.accent2.B },
+                bgTint       = { THEME.bgTint.R,  THEME.bgTint.G,  THEME.bgTint.B  },
+                bgStrength   = THEME.bgStrength,
+                transparency = THEME.transparency,
+            }))
+        end)
+    end)
+end
+
+local function loadSavedTheme()
+    local ok, data = pcall(function()
+        if type(readfile) ~= "function" then error("no filesystem") end
+        return game:GetService("HttpService"):JSONDecode(readfile(THEME_FILE))
+    end)
+    if not (ok and type(data) == "table") then return false end
+    pcall(function()
+        if type(data.accent) == "table" and #data.accent == 3 then
+            THEME.accent = Color3.new(data.accent[1], data.accent[2], data.accent[3])
+        end
+        if type(data.accent2) == "table" and #data.accent2 == 3 then
+            THEME.accent2 = Color3.new(data.accent2[1], data.accent2[2], data.accent2[3])
+        end
+        if type(data.bgTint) == "table" and #data.bgTint == 3 then
+            THEME.bgTint = Color3.new(data.bgTint[1], data.bgTint[2], data.bgTint[3])
+        end
+        if type(data.bgStrength) == "number" then
+            THEME.bgStrength = math.clamp(data.bgStrength, 0, 1)
+        end
+        if type(data.transparency) == "number" then
+            THEME.transparency = math.clamp(data.transparency, 0, 0.35)
+        end
+        THEME.preset = (type(data.preset) == "string" and THEME_PRESETS[data.preset]) and data.preset or "Custom"
+    end)
+    return true
+end
+
+local function loadThemePreset(key)
+    local p = THEME_PRESETS[key]
+    if not p then return end
+    THEME.preset = key
+    THEME.accent = p.accent
+    THEME.accent2 = p.accent2
+    THEME.bgTint = p.bgTint
+    THEME.bgStrength = p.bgStrength
+    THEME.transparency = p.transparency
+end
+
+local suppressThemeSync = false
+
+local function syncThemeControls()
+    suppressThemeSync = true
+    pcall(function()
+        Options.Theme_AccentR:SetValue(math.floor(THEME.accent.R * 255 + 0.5))
+        Options.Theme_AccentG:SetValue(math.floor(THEME.accent.G * 255 + 0.5))
+        Options.Theme_AccentB:SetValue(math.floor(THEME.accent.B * 255 + 0.5))
+        Options.Theme_Accent2R:SetValue(math.floor(THEME.accent2.R *
+Got the complete file this time — the `pcall` closes properly and `flashError` handling is present. Before the code, three things you need to know:
+
+1. **Your final paste was missing three things** that existed in your earlier pastes: **Section 4a (Elliot Predictive Aimbot)**, **Section 4c (Anti-Backstab)**, and the `local tabTwoTime = win:Tab(...)` line (without it, the script errors at `tabTwoTime:Section(...)`). Since your forward declarations explicitly reference `elliotAim` ("assigned in section 4a") and your instruction is "do not remove existing features," I restored both sections from your earlier pastes and used the namecall hook **with** the `elliotAim` guard (the version that pairs with 4a).
+2. **Library loading**: the script loads Fluent via its official distribution URLs using your original dual-URL fallback pattern. Fluent Modded forks are API-compatible drop-ins — if you use a specific Modded build, just swap the URL in the loader; every element call uses the shared Fluent API.
+3. **Theme system**: theming is applied by a self-contained engine that repaints the library's actual UI instances (no reliance on internal library tables, so it can't break on any Fluent build), with presets, accent/secondary colorpickers, glass transparency, and automatic persistence to `BetrayalHub_Theme.json` via executor file APIs (pcall-guarded). One pre-existing quirk preserved as-is: `setupHitTracker` is checked as a *global* in `CharacterAdded` but defined *local* in Section 7, so that respawn wiring never fires in your original either — I left it untouched (fix = add it to the forward declarations, if you want it).
+
+```lua
+print("BetrayalHub Custom loading...")
+
+local SCRIPT_VERSION = "v4.0.2"
+
+-- ============================================================
+-- ERROR HANDLER
+-- ============================================================
+local function flashError(msg)
+    pcall(function()
+        local player = game:GetService("Players").LocalPlayer
+        local gui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", 5)
+        if not gui then return end
+        local errorGui = Instance.new("ScreenGui")
+        errorGui.Name = "BetrayalHub_Error"
+        errorGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        errorGui.Parent = gui
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 450, 0, 80)
+        frame.Position = UDim2.new(0.5, -225, 0.5, -40)
+        frame.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
+        frame.BackgroundTransparency = 0.2
+        frame.BorderSizePixel = 2
+        frame.BorderColor3 = Color3.fromRGB(255, 50, 50)
+        frame.Parent = errorGui
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 8)
+        corner.Parent = frame
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -20, 1, -20)
+        label.Position = UDim2.new(0, 10, 0, 10)
+        label.Text = "⚠️ BetrayalHub Error:\n" .. tostring(msg):sub(1, 150)
+        label.TextColor3 = Color3.fromRGB(255, 200, 200)
+        label.TextScaled = true
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamBold
+        label.Parent = frame
+        task.delay(10, function() pcall(function() errorGui:Destroy() end) end)
+    end)
+end
+
+local success, err = pcall(function()
+
+-- ============================================================
+-- FORWARD DECLARATIONS
+-- Required because oldNamecall (section 4) references tt and
+-- activeBackstabConn which are assigned in section 5.
+-- Lua closures close over the upvalue slot, not the value —
+-- so assigning later is fine as long as no call fires before
+-- section 5 runs (it won't; the game hasn't started yet).
+-- ============================================================
+local tt                    -- assigned in section 5
+local activeBackstabConn    -- assigned in section 5
+local doTriggerFlash        -- defined in section 6 HUD block
+local staminaEstimate       -- defined in section 7 Helper block
+local helper                -- defined in section 7 Helper block
+local elliotAim             -- assigned in section 4a Elliot Predictive Aimbot
+
+-- ============================================================
+-- SERVICES & LOCAL PLAYER
+-- ============================================================
+local svc = {
+    Players = game:GetService("Players"),
+    Run     = game:GetService("RunService"),
+    RS      = game:GetService("ReplicatedStorage"),
+    WS      = game:GetService("Workspace"),
+    VIM     = game:GetService("VirtualInputManager"),
+    Stats   = game:GetService("Stats"),
+    Input   = game:GetService("UserInputService"),
+}
+local lp = svc.Players.LocalPlayer
+
+-- ── Helpers ──────────────────────────────────────────────────
+local function ensureTouchGuiVisible()
+    pcall(function()
+        local pg = lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local tg = pg:FindFirstChild("TouchGui")
+        if tg then
+            tg.Enabled = true
+            local frame = tg:FindFirstChild("TouchControlFrame")
+            if frame then frame.Visible = true end
+        end
+    end)
+end
+
+local function getRemoteEvent()
+    local ok, re = pcall(function()
+        return svc.RS.Modules.Network.Network:FindFirstChild("RemoteEvent")
+    end)
+    return ok and re or nil
+end
+
+local function getTeamFolder(name)
+    local root = svc.WS:FindFirstChild("Players")
+    return root and root:FindFirstChild(name)
+end
+
+-- ============================================================
+-- FLUENT (MODDED) LOADER
+-- Fluent Modded builds are API-compatible drop-ins for Fluent.
+-- If you use a specific Modded fork, replace the URLs below with
+-- its release/raw link — every element call in this script uses
+-- the shared Fluent API.
+-- ============================================================
+local Fluent
+
+local function tryLoadUI(url)
+    local ok, src = pcall(game.HttpGet, game, url)
+    if not (ok and src and #src > 100) then return nil end
+    local lok, fn = pcall(loadstring, src)
+    if not (lok and fn) then return nil end
+    local iok, inst = pcall(fn)
+    return (iok and inst) or nil
+end
+
+Fluent = tryLoadUI("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua")
+     or tryLoadUI("https://raw.githubusercontent.com/dawid-scripts/Fluent/main/main.lua")
+
+if not Fluent then error("Failed to load Fluent UI library.") end
+
+-- ============================================================
+-- SPACE THEME ENGINE CORE
+-- 🌌 Galaxy command-center appearance layer for the Fluent UI.
+-- Self-contained: it detects Fluent's default accent color and
+-- repaints the library's live UI instances (backgrounds, strokes,
+-- text, gradients, scrollbars). It never depends on Fluent's
+-- internal tables, so it works on any Fluent / Fluent-Modded
+-- build and re-applies itself to elements created later
+-- (notifications, dropdown lists, etc).
+-- ============================================================
+
+local THEME_PRESETS = {
+    ["Deep Space"] = {
+        accent    = Color3.fromRGB(0, 195, 255),     -- cyan primary
+        secondary = Color3.fromRGB(168, 85, 255),    -- purple secondary
+        bg   = {0.70, 0.80, 1.42, 0.030},
+        text = {0.92, 0.97, 1.10},
+    },
+    ["Neon Blue"] = {
+        accent    = Color3.fromRGB(0, 170, 255),
+        secondary = Color3.fromRGB(96, 165, 255),
+        bg   = {0.62, 0.74, 1.30, 0.045},
+        text = {0.90, 0.95, 1.12},
+    },
+    ["Cosmic Purple"] = {
+        accent    = Color3.fromRGB(186, 104, 255),
+        secondary = Color3.fromRGB(255, 110, 220),
+        bg   = {0.84, 0.70, 1.30, 0.045},
+        text = {0.98, 0.92, 1.08},
+    },
+    ["Void"] = {
+        accent    = Color3.fromRGB(124, 140, 255),
+        secondary = Color3.fromRGB(205, 205, 255),
+        bg   = {0.40, 0.42, 0.60, 0.008},
+        text = {0.88, 0.90, 1.06},
+    },
+    ["Nebula"] = {
+        accent    = Color3.fromRGB(255, 105, 215),
+        secondary = Color3.fromRGB(118, 98, 255),
+        bg   = {0.74, 0.62, 1.28, 0.055},
+        text = {0.98, 0.90, 1.10},
+    },
+}
+
+local Theme = {
+    preset       = "Deep Space",
+    accent       = THEME_PRESETS["Deep Space"].accent,
+    secondary    = THEME_PRESETS["Deep Space"].secondary,
+    bgShift      = THEME_PRESETS["Deep Space"].bg,
+    textShift    = THEME_PRESETS["Deep Space"].text,
+    transparency = 0,
+    gui          = nil,
+    origAccent   = nil,   -- Fluent's factory accent (detected)
+    lastAccent   = nil,   -- last accent WE applied
+    ready        = false, -- blocks handlers during construction
+    syncing      = false, -- blocks handlers during programmatic SetValue
+    _orig        = setmetatable({}, { __mode = "k" }),
+}
+
+local _sectionTitles  = {}   -- section header texts → secondary accent
+local _brandTexts     = { ["BetrayalHub"] = true }
+local _brandPrefixes  = { "Custom Edition" }
+
+-- Forward-declared Appearance controls (wired in section 9)
+local accentPicker, secondaryPicker, glassSlider, presetDropdown
+
+local function cLum(c) return (c.R + c.G + c.B) / 3 end
+local function cSat(c) return math.max(c.R, c.G, c.B) - math.min(c.R, c.G, c.B) end
+local function cClose(a, b)
+    if not a or not b then return false end
+    return math.abs(a.R - b.R) <= 0.015
+       and math.abs(a.G - b.G) <= 0.015
+       and math.abs(a.B - b.B) <= 0.015
+end
+
+local function isAccentColor(c)
+    return (Theme.origAccent and cClose(c, Theme.origAccent))
+        or (Theme.lastAccent  and cClose(c, Theme.lastAccent))
+end
+
+local function shiftBackground(c)
+    local s = Theme.bgShift
+    return Color3.new(
+        math.clamp(c.R * s[1], 0, 1),
+        math.clamp(c.G * s[2], 0, 1),
+        math.clamp(c.B * s[3] + s[4], 0, 1))
+end
+
+local function shiftText(c)
+    local s = Theme.textShift
+    return Color3.new(
+        math.clamp(c.R * s[1], 0, 1),
+        math.clamp(c.G * s[2], 0, 1),
+        math.clamp(c.B * s[3], 0, 1))
+end
+
+local function isSecondaryText(text)
+    if not text then return false end
+    if _brandTexts[text] then return true end
+    if _sectionTitles[text] then return true end
+    for _, p in ipairs(_brandPrefixes) do
+        if text:sub(1, #p) == p then return true end
+    end
+    return false
+end
+
+-- Records an instance's original colors once, then (re)paints it with
+-- the active theme. Idempotent — safe to call every sweep.
+local function themeInstance(inst)
+    if not inst then return end
+    local rec = Theme._orig[inst]
+    if rec == nil then
+        rec = {}
+        pcall(function()
+            if inst:IsA("GuiObject") then
+                rec.bg = inst.BackgroundColor3
+                rec.tr = inst.BackgroundTransparency
+            end
+            if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+                rec.tc = inst.TextColor3
+                rec.tx = inst.Text
+            end
+            if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+                rec.ic = inst.ImageColor3
+            end
+            if inst:IsA("UIStroke") then
+                rec.sc = inst.Color
+            end
+            if inst:IsA("UIGradient") then
+                rec.gr = inst.Color
+            end
+            if inst:IsA("ScrollingFrame") then
+                rec.sb = inst.ScrollBarImageColor3
+            end
+        end)
+        Theme._orig[inst] = rec
+    end
+
+    pcall(function()
+        -- Backgrounds (dark grays → deep space blue, accent → theme accent)
+        if rec.bg then
+            local cur = inst.BackgroundColor3
+            if isAccentColor(cur) then
+                inst.BackgroundColor3 = Theme.accent
+            elseif cClose(cur, rec.bg) then
+                if cSat(rec.bg) <= 0.14 and cLum(rec.bg) <= 0.40 then
+                    inst.BackgroundColor3 = shiftBackground(rec.bg)
+                end
+            end
+            if rec.tr ~= nil and rec.tr < 0.45 then
+                inst.BackgroundTransparency = math.min(0.55, rec.tr + Theme.transparency)
+            end
+        end
+
+        -- Text (accent → theme accent; headers/title → secondary; grays → cool shift)
+        if rec.tc then
+            local cur = inst.TextColor3
+            if isAccentColor(cur) then
+                inst.TextColor3 = Theme.accent
+            elseif cClose(cur, rec.tc) then
+                if isSecondaryText(rec.tx) then
+                    inst.TextColor3 = Theme.secondary
+                elseif cSat(rec.tc) <= 0.14 then
+                    inst.TextColor3 = shiftText(rec.tc)
+                end
+            end
+        end
+
+        -- Images: accent replacement only (logos/art stay intact)
+        if rec.ic then
+            local cur = inst.ImageColor3
+            if isAccentColor(cur) then
+                inst.ImageColor3 = Theme.accent
+            end
+        end
+
+        -- Strokes: accent or dark-gray → space-tinted border glow
+        if rec.sc then
+            local cur = inst.Color
+            if isAccentColor(cur) then
+                inst.Color = Theme.accent
+            elseif cClose(cur, rec.sc) and cSat(rec.sc) <= 0.20 and cLum(rec.sc) <= 0.55 then
+                inst.Color = shiftBackground(rec.sc)
+            end
+        end
+
+        -- Gradients: rebuild only when an accent keypoint is present
+        if rec.gr then
+            local cur = inst.Color
+            local hit = false
+            for _, kp in ipairs(cur.Keypoints) do
+                if isAccentColor(kp.Value) then hit = true; break end
+            end
+            if hit then
+                local kps = {}
+                for _, kp in ipairs(cur.Keypoints) do
+                    local v = kp.Value
+                    if isAccentColor(v) then v = Theme.accent end
+                    kps[#kps + 1] = ColorSequenceKeypoint.new(kp.Time, v)
+                end
+                inst.Color = ColorSequence.new(kps)
+            end
+        end
+
+        -- Scrollbars
+        if rec.sb then
+            local cur = inst.ScrollBarImageColor3
+            if isAccentColor(cur) then
+                inst.ScrollBarImageColor3 = Theme.accent
+            elseif cClose(cur, rec.sb) and cSat(rec.sb) <= 0.14 then
+                inst.ScrollBarImageColor3 = shiftText(rec.sb)
+            end
+        end
+    end)
+
+    if Theme.accent  then Theme.lastAccent  = Theme.accent  end
+end
+
+local function fullSweep()
+    if not Theme.gui then return end
+    pcall(function()
+        for _, inst in ipairs(Theme.gui:GetDescendants()) do
+            themeInstance(inst)
+        end
+    end)
+end
+
+-- Detects Fluent's factory accent by finding the most frequent
+-- saturated color in the freshly-built UI (toggle pills, slider
+-- fills, tab highlight all share it).
+local function detectAccent()
+    if not Theme.gui then return end
+    local counts = {}
+    local function bump(c)
+        if not c then return end
+        if cSat(c) >= 0.22 and cLum(c) >= 0.25 then
+            local k = string.format("%.3f/%.3f/%.3f", c.R, c.G, c.B)
+            counts[k] = (counts[k] or 0) + 1
+        end
+    end
+    pcall(function()
+        for _, inst in ipairs(Theme.gui:GetDescendants()) do
+            if inst:IsA("GuiObject") then bump(inst.BackgroundColor3) end
+            if inst:IsA("TextLabel") or inst:IsA("TextButton") then bump(inst.TextColor3) end
+            if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then bump(inst.ImageColor3) end
+            if inst:IsA("UIStroke") then bump(inst.Color) end
+            if inst:IsA("UIGradient") then
+                for _, kp in ipairs(inst.Color.Keypoints) do bump(kp.Value) end
+            end
+        end
+    end)
+    local bestK, bestN = nil, 0
+    for k, n in pairs(counts) do
+        if n > bestN then bestN, bestK = n, k end
+    end
+    if bestK and bestN >= 3 then
+        local r, g, b = bestK:match("^(%d+%.%d+)/(%d+%.%d+)/(%d+%.%d+)$")
+        if r then Theme.origAccent = Color3.new(tonumber(r), tonumber(g), tonumber(b)) end
+    end
+    if not Theme.origAccent then
+        Theme.origAccent = Color3.fromRGB(255, 117, 113) -- Fluent default accent (fallback)
+    end
+end
+
+-- Locates Fluent's root ScreenGui by diffing GUI containers
+-- before/after window creation (no dependence on internal names).
+local function findFluentRootGui(preGuis, parents)
+    local best, bestN = nil, -1
+    pcall(function()
+        for _, p in ipairs(parents) do
+            for _, c in ipairs(p:GetChildren()) do
+                if not preGuis[c] and c:IsA("ScreenGui") then
+                    local n = #c:GetDescendants()
+                    if n > bestN then bestN = n; best = c end
+                end
+            end
+        end
+    end)
+    return best
+end
+
+-- ── Theme persistence (executor file APIs, fully guarded) ─────
+local HttpService = game:GetService("HttpService")
+local THEME_FILE  = "BetrayalHub_Theme.json"
+
+local function saveThemeFile()
+    pcall(function()
+        if type(writefile) ~= "function" then return end
+        local function c2t(c)
+            return { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+        end
+        writefile(THEME_FILE, HttpService:JSONEncode({
+            preset       = Theme.preset,
+            accent       = c2t(Theme.accent),
+            secondary    = c2t(Theme.secondary),
+            transparency = Theme.transparency,
+            bg           = { Theme.bgShift[1], Theme.bgShift[2], Theme.bgShift[3], Theme.bgShift[4] },
+            text         = { Theme.textShift[1], Theme.textShift[2], Theme.textShift[3] },
+        }))
+    end)
+end
+
+local _savePending = false
+local function queueSaveTheme()
+    if _savePending then return end
+    _savePending = true
+    task.delay(1.5, function()
+        _savePending = false
+        saveThemeFile()
+    end)
+end
+
+local function loadThemeFile()
+    pcall(function()
+        if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+        if not isfile(THEME_FILE) then return end
+        local data = HttpService:JSONDecode(readfile(THEME_FILE))
+        if type(data) ~= "table" then return end
+        local custom = false
+        if type(data.preset) == "string" and THEME_PRESETS[data.preset] then
+            local p = THEME_PRESETS[data.preset]
+            Theme.preset, Theme.bgShift, Theme.textShift = data.preset, p.bg, p.text
+        end
+        local function readColor(t)
+            if type(t) == "table" and #t >= 3 then
+                return Color3.fromRGB(
+                    math.clamp(math.floor(t[1] + 0.5), 0, 255),
+                    math.clamp(math.floor(t[2] + 0.5), 0, 255),
+                    math.clamp(math.floor(t[3] + 0.5), 0, 255))
+            end
+            return nil
+        end
+        local a = readColor(data.accent);    if a then Theme.accent    = a; custom = true end
+        local s = readColor(data.secondary); if s then Theme.secondary = s; custom = true end
+        if type(data.bg) == "table" and #data.bg >= 4 then Theme.bgShift = data.bg end
+        if type(data.text) == "table" and #data.text >= 3 then Theme.textShift = data.text end
+        if type(data.transparency) == "number" then
+            Theme.transparency = math.clamp(data.transparency, 0, 0.25)
+        end
+        if custom then Theme.preset = "Custom" end
+    end)
+end
+
+local function applyThemePreset(name)
+    local p = THEME_PRESETS[name]
+    if not p then return end
+    Theme.preset    = name
+    Theme.accent    = p.accent
+    Theme.secondary = p.secondary
+    Theme.bgShift   = p.bg
+    Theme.textShift = p.text
+    Theme.syncing = true
+    if accentPicker    then pcall(function() accentPicker:SetValue(p.accent)      end) end
+    if secondaryPicker then pcall(function() secondaryPicker:SetValue(p.secondary) end) end
+    if presetDropdown  then pcall(function() presetDropdown:SetValue(name)        end) end
+    Theme.syncing = false
+    fullSweep()
+    queueSaveTheme()
+end
+
+-- Section wrapper — records header text so the theme engine can
+-- paint section headers with the secondary (purple) accent.
+local function addSection(tab, title)
+    if title then _sectionTitles[title] = true end
+    local ok, s = pcall(function() return tab:AddSection(title) end)
+    if ok and s then return s end
+    ok, s = pcall(function() return tab:AddSection({ Title = title }) end)
+    return (ok and s) or nil
+end
+
+-- ============================================================
+-- WINDOW CREATION
+-- ============================================================
+-- Snapshot GUI containers BEFORE window creation so the theme
+-- engine can locate Fluent's root ScreenGui afterwards
+local _guiParents = {}
+pcall(function() table.insert(_guiParents, game:GetService("CoreGui")) end)
+pcall(function()
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    if pg then table.insert(_guiParents, pg) end
+end)
+pcall(function()
+    if type(gethui) == "function" then table.insert(_guiParents, gethui()) end
+end)
+local _preGuis = {}
+for _, _p in ipairs(_guiParents) do
+    for _, _c in ipairs(_p:GetChildren()) do _preGuis[_c] = true end
+end
+
+local Window = Fluent:CreateWindow({
+    Title           = "BetrayalHub",
+    SubTitle        = "Custom Edition " .. SCRIPT_VERSION,
+    TabWidth        = 148,
+    Size            = UDim2.fromOffset(540, 480),
+    Acrylic         = true,
+    Theme           = "Dark",
+    MinimizeKey     = Enum.KeyCode.L,   -- was win:SetToggleKey(Enum.KeyCode.L)
+    MinimizeKeybind = Enum.KeyCode.L,
+})
+
+-- ============================================================
+-- VERSION HUD
+-- ============================================================
+local versionHud = {
+    enabled     = false,
+    gui         = nil,
+    label       = nil,
+    conn        = nil,
+    frameCount  = 0,
+    lastFpsTime = os.clock(),
+    currentFps  = 60,
+}
+
+local function getPingMs()
+    local ok, v = pcall(function()
+        return svc.Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return (ok and v and math.floor(v)) or 0
+end
+
+local function toggleVersionHud(state)
+    versionHud.enabled = state
+    if not state then
+        if versionHud.gui  then pcall(function() versionHud.gui:Destroy()    end); versionHud.gui=nil;  versionHud.label=nil end
+        if versionHud.conn then pcall(function() versionHud.conn:Disconnect() end); versionHud.conn=nil end
+        return
+    end
+    if versionHud.gui then return end
+
+    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
+    if not pg then return end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name="BetrayalHub_VersionHUD"; sg.ResetOnSpawn=false
+    sg.IgnoreGuiInset=true; sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
+
+    local frame = Instance.new("Frame")
+    frame.Size=UDim2.new(0,220,0,32); frame.Position=UDim2.new(0.5,-110,0,10)
+    frame.BackgroundColor3=Color3.fromRGB(18,18,24); frame.BackgroundTransparency=0.25
+    frame.BorderSizePixel=1; frame.BorderColor3=Color3.fromRGB(220,40,60)
+    frame.Active=true; frame.Draggable=true; frame.Parent=sg
+    local co=Instance.new("UICorner"); co.CornerRadius=UDim.new(0,8); co.Parent=frame
+    local pd=Instance.new("UIPadding"); pd.PaddingLeft=UDim.new(0,8); pd.PaddingRight=UDim.new(0,8); pd.Parent=frame
+
+    local txt=Instance.new("TextLabel")
+    txt.Size=UDim2.new(1,0,1,0); txt.BackgroundTransparency=1
+    txt.Text="✨ BetrayalHub "..SCRIPT_VERSION.." | FPS:60 | Ping:0ms"
+    txt.TextColor3=Color3.fromRGB(255,230,235); txt.TextSize=11
+    txt.Font=Enum.Font.GothamBold; txt.TextXAlignment=Enum.TextXAlignment.Center; txt.Parent=frame
+
+    versionHud.gui=sg; versionHud.label=txt
+    versionHud.conn = svc.Run.RenderStepped:Connect(function()
+        if not versionHud.enabled or not versionHud.label or not versionHud.label.Parent then return end
+        versionHud.frameCount = versionHud.frameCount + 1
+        local now = os.clock()
+        if now - versionHud.lastFpsTime >= 1 then
+            versionHud.currentFps  = versionHud.frameCount
+            versionHud.frameCount  = 0
+            versionHud.lastFpsTime = now
+        end
+        versionHud.label.Text = string.format(
+            "✨ BetrayalHub %s | %d FPS | %dms",
+            SCRIPT_VERSION, versionHud.currentFps, getPingMs()
+        )
+    end)
+end
+
+-- ============================================================
+-- 1. ESP
+-- ============================================================
+local tabESP = Window:AddTab({ Title="ESP", Icon="eye" })
+local secESP = addSection(tabESP, "ESP Settings")
+
+local espState = {
+    enabled       = true,
+    showKillers   = true,
+    showSurvivors = true,
+    showGenerators= true,
+    highlights    = {},
+    billboards    = {},
+    healthConns   = {},
+}
+local COLORS = {
+    Killer    = Color3.fromRGB(255, 60,  60),
+    Survivor  = Color3.fromRGB(60,  255, 60),
+    Generator = Color3.fromRGB(255, 210, 50),
+}
+
+local function clearESP()
+    for _, hl   in pairs(espState.highlights)  do if hl   and hl.Parent   then pcall(function() hl:Destroy()       end) end end
+    for _, bb   in pairs(espState.billboards)  do if bb   and bb.Parent   then pcall(function() bb:Destroy()       end) end end
+    for _, conn in pairs(espState.healthConns) do                               pcall(function() conn:Disconnect()  end)       end
+    espState.highlights={}; espState.billboards={}; espState.healthConns={}
+end
+
+local function createESPItem(obj, color, title, isChar)
+    if not obj or not obj.Parent or espState.highlights[obj] then return end
+    local hrp = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChildWhichIsA("BasePart")
+    if not hrp then return end
+
+    local hl = Instance.new("Highlight")
+    hl.Name="BH_ESP_HL"; hl.Adornee=obj; hl.FillColor=color; hl.FillTransparency=0.5
+    hl.OutlineColor=color; hl.OutlineTransparency=0.1
+    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=obj
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name="BH_ESP_BB"; bb.Adornee=hrp; bb.Size=UDim2.new(0,140,0,22)
+    bb.StudsOffset=Vector3.new(0,3.5,0); bb.AlwaysOnTop=true; bb.Parent=obj
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+    lbl.TextColor3=color; lbl.TextStrokeColor3=Color3.new(0,0,0)
+    lbl.TextStrokeTransparency=0.2; lbl.Font=Enum.Font.GothamBold
+    lbl.TextSize=11; lbl.Parent=bb
+
+    espState.highlights[obj] = hl
+    espState.billboards[obj] = bb
+
+    if isChar then
+        local function updateText()
+            if not obj or not obj.Parent then return end
+            local myChar = lp.Character
+            local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local dist   = (myHRP and hrp) and string.format("%.0fm",(hrp.Position-myHRP.Position).Magnitude) or ""
+            local hum    = obj:FindFirstChildOfClass("Humanoid")
+            local hp     = hum and string.format("%d HP",math.floor(hum.Health)) or ""
+            lbl.Text = (dist~="" and hp~="") and string.format("%s [%s] (%s)",title,hp,dist) or title
+        end
+        updateText()
+        local hum = obj:FindFirstChildOfClass("Humanoid")
+        if hum then espState.healthConns[obj] = hum.HealthChanged:Connect(updateText) end
+    else
+        lbl.Text = title
+    end
+end
+
+local function scanESP()
+    if not espState.enabled then return end
+    -- prune dead entries
+    for obj in pairs(espState.highlights) do
+        if not obj or not obj.Parent then
+            if espState.highlights[obj]  then pcall(function() espState.highlights[obj]:Destroy()    end) end
+            if espState.billboards[obj]  then pcall(function() espState.billboards[obj]:Destroy()    end) end
+            if espState.healthConns[obj] then pcall(function() espState.healthConns[obj]:Disconnect() end) end
+            espState.highlights[obj]=nil; espState.billboards[obj]=nil; espState.healthConns[obj]=nil
+        end
+    end
+    if espState.showKillers then
+        local kf=getTeamFolder("Killers")
+        if kf then for _,char in ipairs(kf:GetChildren()) do
+            if char:IsA("Model") and char~=lp.Character then
+                local h=char:FindFirstChildOfClass("Humanoid")
+                if h and h.Health>0 then createESPItem(char,COLORS.Killer,"Killer: "..char.Name,true) end
+            end
+        end end
+    end
+    if espState.showSurvivors then
+        local sf=getTeamFolder("Survivors")
+        if sf then for _,char in ipairs(sf:GetChildren()) do
+            if char:IsA("Model") and char~=lp.Character then
+                local h=char:FindFirstChildOfClass("Humanoid")
+                if h and h.Health>0 then createESPItem(char,COLORS.Survivor,char.Name,true) end
+            end
+        end end
+    end
+    if espState.showGenerators then
+        local map=svc.WS:FindFirstChild("Map")
+        local ingame=map and map:FindFirstChild("Ingame")
+        local mc=ingame and ingame:FindFirstChild("Map")
+        if mc then for _,item in ipairs(mc:GetChildren()) do
+            if item.Name=="Generator" then createESPItem(item,COLORS.Generator,"Generator",false) end
+        end end
+    end
+end
+
+task.spawn(function() while true do task.wait(1); pcall(scanESP) end end)
+
+tabESP:AddToggle("ESP_Enable", {Title="Enable ESP", Default=true})
+    :OnChanged(function(v) espState.enabled=v;       if not v then clearESP() else scanESP() end end)
+tabESP:AddToggle("ESP_Killers", {Title="Killers ESP", Default=true})
+    :OnChanged(function(v) espState.showKillers=v;   clearESP(); scanESP() end)
+tabESP:AddToggle("ESP_Survivors", {Title="Survivors ESP", Default=true})
+    :OnChanged(function(v) espState.showSurvivors=v; clearESP(); scanESP() end)
+tabESP:AddToggle("ESP_Generators", {Title="Generators ESP", Default=true})
+    :OnChanged(function(v) espState.showGenerators=v;clearESP(); scanESP() end)
+
+-- ============================================================
+-- 2. AUTO GENERATOR
+-- ============================================================
+local tabGen = Window:AddTab({Title="Generator", Icon="circuit-board"})
+local secGen = addSection(tabGen, "Auto Solve")
+
+local genState = {enabled=false, nodeDelay=0.03, lineDelay=0.4}
+
+local function flowKey(n) return n.row.."-"..n.col end
+
+local function flowNeighbour(r1,c1,r2,c2)
+    if r2==r1-1 and c2==c1 then return "up"    end
+    if r2==r1+1 and c2==c1 then return "down"  end
+    if r2==r1 and c2==c1-1 then return "left"  end
+    if r2==r1 and c2==c1+1 then return "right" end
+    return false
+end
+
+local function flowOrder(path, endpoints)
+    if not path or #path==0 then return path end
+    local lookup={}
+    for _,n in ipairs(path) do lookup[flowKey(n)]=n end
+    local start
+    for _,ep in ipairs(endpoints or {}) do
+        for _,n in ipairs(path) do
+            if n.row==ep.row and n.col==ep.col then start={row=ep.row,col=ep.col}; break end
+        end
+        if start then break end
+    end
+    if not start then
+        for _,n in ipairs(path) do
+            local nb=0
+            for _,d in ipairs({{-1,0},{1,0},{0,-1},{0,1}}) do
+                if lookup[(n.row+d[1]).."-"..(n.col+d[2])] then nb=nb+1 end
+            end
+            if nb==1 then start={row=n.row,col=n.col}; break end
+        end
+    end
+    if not start then start={row=path[1].row,col=path[1].col} end
+    local pool,ordered={},{}
+    for _,n in ipairs(path) do pool[flowKey(n)]={row=n.row,col=n.col} end
+    local cur=start
+    table.insert(ordered,{row=cur.row,col=cur.col}); pool[flowKey(cur)]=nil
+    while next(pool) do
+        local moved=false
+        for k,node in pairs(pool) do
+            if flowNeighbour(cur.row,cur.col,node.row,node.col) then
+                table.insert(ordered,{row=node.row,col=node.col})
+                pool[k]=nil; cur=node; moved=true; break
+            end
+        end
+        if not moved then break end
+    end
+    return ordered
+end
+
+local function solveFlow(puzzle)
+    pcall(function()
+        if not puzzle or not puzzle.Solution then return end
+        local indices={}
+        for i=1,#puzzle.Solution do indices[i]=i end
+        for i=#indices,2,-1 do local j=math.random(1,i); indices[i],indices[j]=indices[j],indices[i] end
+        for _,ci in ipairs(indices) do
+            local solution=puzzle.Solution[ci]; if not solution then continue end
+            local ordered=flowOrder(solution, puzzle.targetPairs and puzzle.targetPairs[ci])
+            if not ordered or #ordered==0 then continue end
+            puzzle.paths[ci]={}
+            for _,node in ipairs(ordered) do
+                table.insert(puzzle.paths[ci],{row=node.row,col=node.col})
+                puzzle:updateGui(); task.wait(genState.nodeDelay)
+            end
+            task.wait(genState.lineDelay); puzzle:checkForWin()
+        end
+    end)
+end
+
+pcall(function()
+    local mf  = svc.RS:FindFirstChild("Modules")
+    local mnf  = mf  and mf:FindFirstChild("Minigames")
+    local fgf  = mnf and mnf:FindFirstChild("FlowGameManager")
+    local fgm  = fgf and fgf:FindFirstChild("FlowGame")
+    if not fgm then return end
+    local ok,FG = pcall(require, fgm)
+    if ok and FG and FG.new then
+        local origNew=FG.new
+        FG.new=function(...)
+            local inst=origNew(...)
+            if genState.enabled then task.spawn(function() task.wait(0.25); solveFlow(inst) end) end
+            return inst
+        end
+    end
+end)
+
+tabGen:AddToggle("GEN_AutoSolve", {Title="Auto Solve Generator", Default=false})
+    :OnChanged(function(v) genState.enabled=v end)
+tabGen:AddSlider("GEN_NodeSpeed", {Title="Node Speed", Min=0.01, Max=0.2, Default=genState.nodeDelay, Rounding=2})
+    :OnChanged(function(v) genState.nodeDelay=v end)
+
+-- ============================================================
+-- 3. INFINITE STAMINA
+-- ============================================================
+local tabGlobal = Window:AddTab({Title="Global", Icon="globe"})
+local secStam   = addSection(tabGlobal, "Stamina")
+local infStam   = false
+
+local function applyStamina()
+    pcall(function()
+        local sm = svc.RS:FindFirstChild("Systems")
+            and svc.RS.Systems:FindFirstChild("Character")
+            and svc.RS.Systems.Character:FindFirstChild("Game")
+            and svc.RS.Systems.Character.Game:FindFirstChild("Sprinting")
+        if sm then local m=require(sm); if m then m.StaminaLossDisabled=infStam end end
+    end)
+end
+
+task.spawn(function() while true do task.wait(0.8); if infStam then applyStamina() end end end)
+tabGlobal:AddToggle("STAM_Infinite", {Title="Infinite Stamina", Default=false})
+    :OnChanged(function(v) infStam=v; applyStamina() end)
+
+-- ============================================================
+-- 4. SURVIVOR AIMBOT
+-- ============================================================
+local tabAimbot = Window:AddTab({Title="Aimbot", Icon="crosshair"})
+local secAim    = addSection(tabAimbot, "Survivor Aimbot")
+
+local aim = {
+    enabled  = false,
+    maxDist  = 100,
+    locked   = false,
+    target   = nil,
+    conn     = nil,
+}
+
+local function getNearestTarget()
+    local char = lp.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local kf      = getTeamFolder("Killers")
+    local sf      = getTeamFolder("Survivors")
+    local folders = {}
+    -- If we are a killer, target survivors; otherwise target killers
+    if kf and char:IsDescendantOf(kf) then
+        table.insert(folders, sf)
+    else
+        table.insert(folders, kf)
+    end
+
+    local best, bestDist = nil, math.huge
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, model in ipairs(folder:GetChildren()) do
+                if model ~= char and model:IsA("Model") then
+                    local r = model:FindFirstChild("HumanoidRootPart")
+                    local h = model:FindFirstChildOfClass("Humanoid")
+                    if r and h and h.Health > 0 then
+                        local d = (r.Position - hrp.Position).Magnitude
+                        if d < bestDist and d <= aim.maxDist then bestDist=d; best=r end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function aimUnlock()
+    if aim.conn then aim.conn:Disconnect(); aim.conn=nil end
+    aim.locked=false; aim.target=nil
+end
+
+local function aimLock(targetHRP)
+    aimUnlock()
+    if not targetHRP or not targetHRP.Parent then return end
+    aim.target=targetHRP; aim.locked=true
+    aim.conn = svc.Run.RenderStepped:Connect(function()
+        if not aim.enabled or not aim.target or not aim.target.Parent then
+            -- BUG FIX: task.defer avoids calling conn:Disconnect() from inside the
+            -- conn's own callback (self-disconnect UB — same class of bug as BUG 2
+            -- in executeBackstab). Direct call here caused the lock to silently
+            -- corrupt state and stop responding until the user toggled it off/on.
+            task.defer(aimUnlock); return
+        end
+        local cam  = svc.WS.CurrentCamera
+        local char = lp.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if cam and hrp then
+            local tp = aim.target.Position
+            cam.CFrame = CFrame.new(cam.CFrame.Position, tp)
+            hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(tp.X, hrp.Position.Y, tp.Z))
+        end
+    end)
+end
+
+-- ── Namecall hook (defined here; references tt + activeBackstabConn
+--    via upvalue slots forward-declared at the top — safe because the
+--    hook only executes on actual FireServer calls, which happen after
+--    the player is in a round and section 5 has already assigned them)
+-- ──
+-- BUG FIX: added guard so the survivor aimbot does NOT hijack the
+-- camera during an active TwoTime backstab. Previously, fireDaggerAbility
+-- itself called FireServer("UseActorAbility"), which triggered this hook,
+-- spawning aimLock() while activeBackstabConn was running — two systems
+-- fighting over hrp.CFrame and cam.CFrame every RenderStepped frame.
+-- Also guards against the Elliot predictive aimbot owning the camera.
+-- ──────────────────────────────────────────────────────────────────────
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args   = {...}
+
+    if aim.enabled and not (elliotAim and elliotAim.enabled) and method == "FireServer" and args[1] == "UseActorAbility" then
+        -- Only fire aimLock when TwoTime is NOT mid-backstab
+        if not (tt and tt.enabled and activeBackstabConn ~= nil) then
+            task.spawn(function()
+                local target = getNearestTarget()
+                if target then aimLock(target) end
+            end)
+        end
+    end
+
+    return oldNamecall(self, ...)
+end)
+
+tabAimbot:AddToggle("AIM_Enable", {Title="Enable Aimbot", Default=false})
+    :OnChanged(function(v) aim.enabled=v; if not v then aimUnlock() end end)
+tabAimbot:AddSlider("AIM_MaxDist", {Title="Max Distance", Min=20, Max=200, Default=aim.maxDist, Rounding=0})
+    :OnChanged(function(v) aim.maxDist=v end)
+tabAimbot:AddButton({Title="Unlock Target", Callback=function() aimUnlock() end})
+
+-- ============================================================
+-- 4a. ELLIOT PREDICTIVE AIMBOT
+-- Production-style predictive targeting for Elliot.
+--
+-- Predictor inputs:
+--   • Target velocity + smoothed acceleration
+--   • Local-player horizontal velocity / movement
+--   • Distance to target
+--   • Current ping
+--   • Local geometry density ("area" / corner factor)
+--   • Adaptive lead time with clamped limits
+--
+-- This is intentionally separate from the legacy Survivor Aimbot so
+-- both systems can be tested/toggled independently.
+-- ============================================================
+local secElliotAim = addSection(tabAimbot, "Elliot Predictive Aimbot")
+
+elliotAim = {
+    enabled        = false,
+    maxDist        = 140,
+    projectileSpeed= 85,      -- tune to the actual attack/projectile speed
+    leadStrength   = 1.00,
+    pingScale      = 0.55,
+    accelWeight    = 0.60,
+    areaWeight     = 0.35,
+    minLead        = 0.02,
+    maxLead        = 0.42,
+    smoothSpeed    = 20,
+    aimHeight      = 1.15,
+    target         = nil,
+    targetModel    = nil,
+    conn           = nil,
+    samples        = {},
+    lastTargetPos  = nil,
+    lastSampleTime = 0,
+    lastAimPos     = nil,
+}
+
+local function isElliotCharacter(model)
+    if not model or not model:IsA("Model") then return false end
+
+    local n = tostring(model.Name):lower():gsub("[%s_%-]", "")
+    if n:find("elliot", 1, true) then return true end
+
+    local ok, attrs = pcall(function() return model:GetAttributes() end)
+    if ok and attrs then
+        for key, value in pairs(attrs) do
+            local k = tostring(key):lower()
+            local v = tostring(value):lower():gsub("[%s_%-]", "")
+            if (k:find("character",1,true)
+                or k:find("kit",1,true)
+                or k:find("selected",1,true)
+                or k:find("actor",1,true)
+                or k:find("class",1,true))
+                and v:find("elliot",1,true) then
+                return true
+            end
+        end
+    end
+
+    for _, child in ipairs(model:GetChildren()) do
+        if child:IsA("StringValue") then
+            local k = child.Name:lower()
+            local v = tostring(child.Value):lower():gsub("[%s_%-]", "")
+            if (k:find("character",1,true)
+                or k:find("kit",1,true)
+                or k:find("selected",1,true)
+                or k:find("actor",1,true)
+                or k:find("class",1,true))
+                and v:find("elliot",1,true) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function getHorizontalVelocity(part)
+    if not part then return Vector3.zero end
+    local v = part.AssemblyLinearVelocity
+    if not v or v.Magnitude < 0.001 then
+        v = part.Velocity
+    end
+    return Vector3.new(v.X, 0, v.Z)
+end
+
+local function getPingSeconds()
+    return math.clamp((getPingMs() or 0) / 1000, 0, 0.30)
+end
+
+-- Estimate how "open" the target's immediate area is.
+-- More nearby collision hits = tighter area/corner = less aggressive lead.
+local function getAreaFactor(targetModel, targetHRP)
+    if not targetHRP then return 1 end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {lp.Character, targetModel}
+
+    local origin = targetHRP.Position + Vector3.new(0, 1.5, 0)
+    local dirs = {
+        Vector3.new( 1,0, 0), Vector3.new(-1,0, 0),
+        Vector3.new( 0,0, 1), Vector3.new( 0,0,-1),
+        Vector3.new( 0.707,0, 0.707), Vector3.new(-0.707,0, 0.707),
+        Vector3.new( 0.707,0,-0.707), Vector3.new(-0.707,0,-0.707),
+    }
+
+    local hits = 0
+    for _, d in ipairs(dirs) do
+        if svc.WS:Raycast(origin, d * 9, params) then hits = hits + 1 end
+    end
+
+    -- 0 hits => 1.0 (open)
+    -- 8 hits => 0.65 (very enclosed)
+    return 1 - (hits / #dirs) * math.clamp(elliotAim.areaWeight, 0, 0.8)
+end
+
+local function resetElliotTrack(targetModel, targetHRP)
+    elliotAim.targetModel    = targetModel
+    elliotAim.target         = targetHRP
+    elliotAim.samples        = {}
+    elliotAim.lastTargetPos  = targetHRP and targetHRP.Position or nil
+    elliotAim.lastSampleTime = os.clock()
+    elliotAim.lastAimPos     = nil
+end
+
+local function sampleElliotTarget(targetHRP)
+    if not targetHRP then return Vector3.zero, Vector3.zero end
+
+    local now = os.clock()
+    local pos = targetHRP.Position
+    local rawVel = getHorizontalVelocity(targetHRP)
+
+    local dt = now - (elliotAim.lastSampleTime or now)
+    elliotAim.lastSampleTime = now
+
+    local accel = Vector3.zero
+    if elliotAim.lastTargetPos and dt > 0.001 then
+        accel = (rawVel - (elliotAim._lastVel or rawVel)) / dt
+        accel = Vector3.new(accel.X, 0, accel.Z)
+    end
+    elliotAim._lastVel = rawVel
+    elliotAim.lastTargetPos = pos
+
+    -- Rolling samples make prediction less sensitive to replication jitter.
+    table.insert(elliotAim.samples, {
+        t = now,
+        v = rawVel,
+        a = accel,
+    })
+    while #elliotAim.samples > 8 do
+        table.remove(elliotAim.samples, 1)
+    end
+
+    local avgV, avgA = Vector3.zero, Vector3.zero
+    for _, s in ipairs(elliotAim.samples) do
+        avgV = avgV + s.v
+        avgA = avgA + s.a
+    end
+    local count = math.max(#elliotAim.samples, 1)
+    return avgV / count, avgA / count
+end
+
+local function getElliotTarget()
+    local char = lp.Character
+    local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+    if not char or not myHRP then return nil, nil end
+
+    local kf = getTeamFolder("Killers")
+    if not kf then return nil, nil end
+
+    local bestModel, bestHRP, bestScore = nil, nil, math.huge
+    for _, model in ipairs(kf:GetChildren()) do
+        if model:IsA("Model") and model ~= char then
+            local hrp = model:FindFirstChild("HumanoidRootPart")
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d <= elliotAim.maxDist then
+                    -- Prefer nearer targets while lightly rewarding targets
+                    -- that are actually in front of the player's camera.
+                    local cam = svc.WS.CurrentCamera
+                    local facingPenalty = 0
+                    if cam then
+                        local toTarget = (hrp.Position - cam.CFrame.Position)
+                        if toTarget.Magnitude > 0.01 then
+                            local dot = cam.CFrame.LookVector:Dot(toTarget.Unit)
+                            facingPenalty = (1 - math.clamp(dot, -1, 1)) * 10
+                        end
+                    end
+                    local score = d + facingPenalty
+                    if score < bestScore then
+                        bestScore, bestModel, bestHRP = score, model, hrp
+                    end
+                end
+            end
+        end
+    end
+
+    return bestModel, bestHRP
+end
+
+local function getElliotPredictedPosition(targetModel, targetHRP, myHRP)
+    if not targetModel or not targetHRP or not myHRP then return nil end
+
+    local targetVel, targetAccel = sampleElliotTarget(targetHRP)
+    local myVel = getHorizontalVelocity(myHRP)
+    local distance = (targetHRP.Position - myHRP.Position).Magnitude
+
+    local speed = math.max(elliotAim.projectileSpeed, 1)
+    local travelTime = distance / speed
+
+    -- Add a bounded network term. Ping is not treated as pure one-way lag;
+    -- this keeps the correction conservative rather than doubling latency.
+    travelTime = travelTime + getPingSeconds() * elliotAim.pingScale
+
+    -- Own movement shifts the expected release/aim frame. The coefficient is
+    -- deliberately modest because Roblox camera movement already includes it.
+    local relativeVel = targetVel - myVel * 0.22
+
+    local areaFactor = getAreaFactor(targetModel, targetHRP)
+    local accelTerm = math.clamp(elliotAim.accelWeight, 0, 1) * 0.5
+    local effectiveT = travelTime * elliotAim.leadStrength * areaFactor
+
+    effectiveT = math.clamp(
+        effectiveT,
+        elliotAim.minLead,
+        elliotAim.maxLead
+    )
+
+    local predicted = targetHRP.Position
+        + relativeVel * effectiveT
+        + targetAccel * (effectiveT * effectiveT) * accelTerm
+
+    -- Keep the aim point on the same practical vertical layer; horizontal
+    -- prediction carries the movement while this avoids aiming into the floor
+    -- from jump/fall replication noise.
+    predicted = Vector3.new(
+        predicted.X,
+        targetHRP.Position.Y + elliotAim.aimHeight,
+        predicted.Z
+    )
+
+    return predicted
+end
+
+local function elliotAimStop()
+    if elliotAim.conn then
+        pcall(function() elliotAim.conn:Disconnect() end)
+        elliotAim.conn = nil
+    end
+    elliotAim.target = nil
+    elliotAim.targetModel = nil
+    elliotAim.samples = {}
+    elliotAim.lastTargetPos = nil
+    elliotAim.lastAimPos = nil
+end
+
+local function elliotAimStart()
+    elliotAimStop()
+
+    elliotAim.conn = svc.Run.RenderStepped:Connect(function(dt)
+        if not elliotAim.enabled then
+            task.defer(elliotAimStop)
+            return
+        end
+
+        local char = lp.Character
+        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+        if not char or not myHRP or not isElliotCharacter(char) then
+            elliotAim.target = nil
+            elliotAim.targetModel = nil
+            elliotAim.samples = {}
+            return
+        end
+
+        local currentTarget, currentHRP = elliotAim.targetModel, elliotAim.target
+
+        -- Re-acquire when target disappears, dies, or leaves range.
+        local invalid = true
+        if currentTarget and currentHRP and currentTarget.Parent and currentHRP.Parent then
+            local hum = currentTarget:FindFirstChildOfClass("Humanoid")
+            local d = (currentHRP.Position - myHRP.Position).Magnitude
+            invalid = (not hum or hum.Health <= 0 or d > elliotAim.maxDist)
+        end
+
+        if invalid then
+            currentTarget, currentHRP = getElliotTarget()
+            if currentTarget and currentHRP then
+                resetElliotTrack(currentTarget, currentHRP)
+            else
+                return
+            end
+        end
+
+        local predicted = getElliotPredictedPosition(currentTarget, currentHRP, myHRP)
+        local cam = svc.WS.CurrentCamera
+        if not predicted or not cam then return end
+
+        -- Smooth only the direction, never the camera position.
+        -- This keeps mobile camera movement responsive while removing
+        -- high-frequency target jitter.
+        local smooth = math.clamp(elliotAim.smoothSpeed, 1, 60)
+        if elliotAim.lastAimPos then
+            local alpha = 1 - math.exp(-smooth * (dt or 1/60))
+            predicted = elliotAim.lastAimPos:Lerp(predicted, alpha)
+        end
+        elliotAim.lastAimPos = predicted
+
+        cam.CFrame = CFrame.new(cam.CFrame.Position, predicted)
+
+        -- Keep the character facing the predicted point too, but don't change
+        -- its Y rotation when the target is essentially vertical above/below.
+        local flat = Vector3.new(predicted.X, myHRP.Position.Y, predicted.Z)
+        if (flat - myHRP.Position).Magnitude > 0.05 then
+            myHRP.CFrame = CFrame.new(myHRP.Position, flat)
+        end
+    end)
+end
+
+tabAimbot:AddToggle("EA_Enable", {Title="Enable Elliot Predictive Aimbot", Default=false})
+    :OnChanged(function(v)
+        elliotAim.enabled = v
+        if v then elliotAimStart() else elliotAimStop() end
+    end)
+tabAimbot:AddSlider("EA_MaxDist", {Title="Max Target Distance", Min=30, Max=200, Default=elliotAim.maxDist, Rounding=0})
+    :OnChanged(function(v) elliotAim.maxDist=v end)
+tabAimbot:AddSlider("EA_ProjSpeed", {Title="Projectile / Attack Speed", Min=20, Max=250, Default=elliotAim.projectileSpeed, Rounding=0})
+    :OnChanged(function(v) elliotAim.projectileSpeed=v end)
+tabAimbot:AddSlider("EA_Lead", {Title="Lead Strength", Min=0.25, Max=1.50, Default=elliotAim.leadStrength, Rounding=2})
+    :OnChanged(function(v) elliotAim.leadStrength=v end)
+tabAimbot:AddSlider("EA_Smooth", {Title="Prediction Smoothing", Min=4, Max=40, Default=elliotAim.smoothSpeed, Rounding=0})
+    :OnChanged(function(v) elliotAim.smoothSpeed=v end)
+tabAimbot:AddSlider("EA_Ping", {Title="Ping Compensation", Min=0, Max=1, Default=elliotAim.pingScale, Rounding=2})
+    :OnChanged(function(v) elliotAim.pingScale=v end)
+tabAimbot:AddButton({
+    Title="Force Re-acquire",
+    Callback=function()
+        elliotAim.target = nil
+        elliotAim.targetModel = nil
+        elliotAim.samples = {}
+        elliotAim.lastTargetPos = nil
+        elliotAim.lastAimPos = nil
+    end
+})
+
+-- ============================================================
+-- 4b. SMART KILLER AIMBOT
+-- Locks cam onto a survivor's LEGS (so the killer keeps
+-- peripheral awareness of surroundings).
+--
+-- Behaviour:
+--   • Acquires nearest survivor within 40 studs on first tick.
+--   • Stays locked to that survivor until they die — never
+--     auto-switches while alive (sticky target).
+--   • If distance > maxDist OR a wall blocks LOS → cam goes
+--     free, but we KEEP the same target identity so we re-lock
+--     the instant they're close and visible again.
+--   • "Force Re-acquire" button clears the lock and picks fresh.
+-- ============================================================
+local secKillerAim = addSection(tabAimbot, "Smart Killer Aimbot")
+
+local killerAim = {
+    enabled      = false,
+    maxDist      = 15,       -- studs — beyond this or when blocked: free cam
+    lockedModel  = nil,      -- the committed survivor Model
+    lockedHRP    = nil,      -- that model's HumanoidRootPart (cached)
+    camActive    = false,    -- whether cam lock is currently applied
+    conn         = nil,
+    injuredFirst = true,     -- NEW: sort by lowest HP on acquisition
+    downedPrio   = true,     -- NEW: targets < 30% HP jump to front regardless of distance
+    camTookOver  = false,    -- NEW: tracks whether we've taken CameraType.Scriptable ownership
+    smoothSpeed  = 14,       -- NEW: rotation lerp speed (higher = snappier, lower = smoother)
+}
+
+-- Walk down the rig hierarchy to find the lowest available
+-- leg/foot bone. Falls back to HRP-2.2 studs if nothing found.
+local function getKillerAimLegPos(model)
+    local priority = {
+        "RightFoot","LeftFoot",
+        "RightLowerLeg","LeftLowerLeg",
+        "Right Leg","Left Leg",
+        "LowerTorso",
+    }
+    for _, name in ipairs(priority) do
+        local part = model:FindFirstChild(name)
+        if part and part:IsA("BasePart") then return part.Position end
+    end
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    return hrp and (hrp.Position - Vector3.new(0, 2.2, 0)) or nil
+end
+
+-- Raycast from killer's eye level to survivor's HRP.
+-- Excludes both characters so their own geometry can't block.
+local function killerAimHasLOS(killerHRP, targetHRP, killerChar, targetChar)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {killerChar, targetChar}
+    local origin = killerHRP.Position + Vector3.new(0, 1.5, 0)
+    local dir    = targetHRP.Position - origin
+    return svc.WS:Raycast(origin, dir, params) == nil
+end
+
+local function killerAimStop()
+    if killerAim.conn then pcall(function() killerAim.conn:Disconnect() end); killerAim.conn=nil end
+    killerAim.lockedModel = nil
+    killerAim.lockedHRP   = nil
+    killerAim.camActive   = false
+    -- Give the camera back to Roblox's normal controller — without this,
+    -- disabling the aimbot mid-lock leaves the player with no free-look
+    -- because CameraType stayed on Scriptable
+    if killerAim.camTookOver then
+        pcall(function() svc.WS.CurrentCamera.CameraType = Enum.CameraType.Custom end)
+        killerAim.camTookOver = false
+    end
+end
+
+local function killerAimRun()
+    killerAimStop()
+    killerAim.conn = svc.Run.RenderStepped:Connect(function(dt)
+        if not killerAim.enabled then
+            -- BUG FIX: same self-disconnect UB as aimLock fix above
+            task.defer(killerAimStop); return
+        end
+
+        local char = lp.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if not char or not hrp then return end
+        local cam = svc.WS.CurrentCamera
+
+        -- ── PATH A: we have a locked target ──────────────────────────
+        if killerAim.lockedModel then
+            local model = killerAim.lockedModel
+            local tHRP  = killerAim.lockedHRP
+            local tHum  = model:FindFirstChildOfClass("Humanoid")
+
+            -- Survivor left the game or died → full release, acquire next frame
+            if not model.Parent or not tHRP or not tHRP.Parent
+               or (tHum and tHum.Health <= 0) then
+                killerAim.lockedModel = nil
+                killerAim.lockedHRP   = nil
+                killerAim.camActive   = false
+                if killerAim.camTookOver then
+                    pcall(function() cam.CameraType = Enum.CameraType.Custom end)
+                    killerAim.camTookOver = false
+                end
+                return
+            end
+
+            local dist   = (tHRP.Position - hrp.Position).Magnitude
+            local hasLOS = killerAimHasLOS(hrp, tHRP, char, model)
+
+            -- Small hysteresis on the range boundary: once locked, don't drop
+            -- until 4 studs past maxDist. Prevents CameraType flicking
+            -- Scriptable/Custom every frame when dist sits right on the edge.
+            local exitDist = killerAim.maxDist + 4
+            local rangeOk  = killerAim.camActive
+                and (dist <= exitDist)
+                or  (dist <= killerAim.maxDist)
+
+            if rangeOk and hasLOS then
+                local legPos = getKillerAimLegPos(model)
+                if cam and legPos then
+                    -- Take full ownership of the camera. Roblox's own
+                    -- Custom-type follow-cam was fighting our rotation-only
+                    -- assignment: it kept recalculating POSITION every frame
+                    -- based on the character, using OUR modified rotation as
+                    -- its input — a steep look-at-legs angle made it snap
+                    -- position to bizarre places trying to "catch up."
+                    -- Scriptable disables that entirely; we now own both.
+                    if not killerAim.camTookOver then
+                        cam.CameraType = Enum.CameraType.Scriptable
+                        killerAim.camTookOver = true
+                    end
+                    -- Position: fixed 8 studs behind + 3 up from the killer's
+                    -- HRP, using a FLATTENED look direction (Y zeroed) so
+                    -- aiming steeply down at the legs never tilts the anchor
+                    -- point itself — only the final look-at rotation tilts.
+                    local lookFlat = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+                    lookFlat = (lookFlat.Magnitude > 0.01) and lookFlat.Unit or Vector3.new(0,0,-1)
+                    local camPos = hrp.Position - lookFlat*8 + Vector3.new(0,3,0)
+
+                    -- Rotation-only smoothing: position stays glued to the
+                    -- killer's body every frame (instant, no lag when YOU
+                    -- move), but the LOOK direction slerps toward the target
+                    -- instead of snapping — this is what stops fast survivor
+                    -- movement from whipping the camera frame-to-frame.
+                    -- "CFrame - Vector3" strips position, keeping rotation
+                    -- only, so Lerp interpolates purely the orientation.
+                    local targetCF   = CFrame.new(camPos, legPos)
+                    local curRotOnly = cam.CFrame - cam.CFrame.Position
+                    local tgtRotOnly = targetCF   - targetCF.Position
+                    local alpha      = 1 - math.exp(-killerAim.smoothSpeed * (dt or 1/60))
+                    cam.CFrame = (curRotOnly:Lerp(tgtRotOnly, alpha)) + camPos
+                end
+                killerAim.camActive = true
+            else
+                -- Too far OR wall in the way → give the camera back so the
+                -- killer gets normal free-look to navigate around
+                if killerAim.camTookOver then
+                    pcall(function() cam.CameraType = Enum.CameraType.Custom end)
+                    killerAim.camTookOver = false
+                end
+                killerAim.camActive = false
+            end
+
+        -- ── PATH B: acquire with priority ────────────────────────────
+        -- 1st: downed (< 30% HP) regardless of distance (if downedPrio)
+        -- 2nd: most injured (lowest HP) (if injuredFirst)
+        -- 3rd: tiebreak by closest distance
+        else
+            local sf = getTeamFolder("Survivors")
+            if not sf then return end
+            local candidates = {}
+            for _, model in ipairs(sf:GetChildren()) do
+                if model ~= char and model:IsA("Model") then
+                    local r = model:FindFirstChild("HumanoidRootPart")
+                    local h = model:FindFirstChildOfClass("Humanoid")
+                    if r and h and h.Health > 0 then
+                        local d = (r.Position - hrp.Position).Magnitude
+                        if d <= 40 then
+                            table.insert(candidates, {
+                                model  = model, hrp = r,
+                                health = h.Health,
+                                maxHP  = math.max(h.MaxHealth, 1),
+                                dist   = d,
+                            })
+                        end
+                    end
+                end
+            end
+            if #candidates == 0 then return end
+            if killerAim.injuredFirst then
+                table.sort(candidates, function(a, b)
+                    local aDn = killerAim.downedPrio and (a.health/a.maxHP) < 0.30
+                    local bDn = killerAim.downedPrio and (b.health/b.maxHP) < 0.30
+                    if aDn ~= bDn then return aDn end
+                    if math.abs(a.health - b.health) > 5 then return a.health < b.health end
+                    return a.dist < b.dist
+                end)
+            end
+            local pick = candidates[1]
+            killerAim.lockedModel = pick.model
+            killerAim.lockedHRP   = pick.hrp
+        end
+    end)
+end
+
+tabAimbot:AddToggle("KA_Enable", {Title="Enable Smart Killer Aimbot", Default=false})
+    :OnChanged(function(v)
+        killerAim.enabled = v
+        if v then killerAimRun() else killerAimStop() end
+    end)
+tabAimbot:AddToggle("KA_InjuredFirst", {Title="Injured First (most damaged target)", Default=true})
+    :OnChanged(function(v) killerAim.injuredFirst = v end)
+tabAimbot:AddToggle("KA_DownedPrio", {Title="Downed Priority (< 30% HP first)", Default=true})
+    :OnChanged(function(v) killerAim.downedPrio = v end)
+tabAimbot:AddSlider("KA_UnlockDist", {Title="Unlock Distance (studs)", Min=5, Max=40, Default=killerAim.maxDist, Rounding=0})
+    :OnChanged(function(v) killerAim.maxDist = v end)
+tabAimbot:AddSlider("KA_Smooth", {Title="Cam Smoothness", Min=4, Max=30, Default=killerAim.smoothSpeed, Rounding=0})
+    :OnChanged(function(v) killerAim.smoothSpeed = v end)
+tabAimbot:AddButton({
+    Title="Force Re-acquire Target",
+    Callback=function()
+        killerAim.lockedModel = nil
+        killerAim.lockedHRP   = nil
+        killerAim.camActive   = false
+    end
+})
+
+-- ============================================================
+-- 4c. ANTI TWO-TIME BACKSTAB (Killer)
+-- Roblox does NOT expose another player's selected character/kit to
+-- your client through any standard channel — Backpack only replicates
+-- for the LocalPlayer, and there's no confirmed public attribute for
+-- "which survivor kit is this." So instead of guessing at kit identity,
+-- this detects the ATTACK PATTERN itself: only Two Time has a working
+-- backstab, so anyone sneaking into your blind cone at close range is
+-- functionally the same threat regardless of whether kit-ID succeeds.
+-- A best-effort kit check exists as an optional stricter filter.
+-- ============================================================
+local secAntiBS = addSection(tabAimbot, "Anti-Backstab (Killer)")
+
+local antiBS = {
+    enabled     = false,
+    dangerRange = 12,    -- studs — proximity treated as "close enough to backstab"
+    coneAngle   = 75,    -- degrees — half-angle of YOUR blind cone (mirrors TwoTime's own cone check)
+    lungeSpeed  = 24,    -- studs/sec toward you — velocity spike that reads as a lunge
+    requireKit  = false, -- if true, only react to a CONFIRMED Two Time (best-effort, may not detect)
+    conn        = nil,
+    threatModel = nil,
+    lastSeenTime= 0,
+}
+
+-- Best-effort kit identification — tries every common signal a game might
+-- expose (attributes, child values, an equipped Tool named like the
+-- ability). Returns false (not confirmed) rather than guessing, since a
+-- false positive here just means requireKit=true stays silent — the
+-- pattern-based detection above still works with this off.
+local function isLikelyTwoTime(model)
+    local ok, attrs = pcall(function() return model:GetAttributes() end)
+    if ok and attrs then
+        for k, v in pairs(attrs) do
+            local lk = tostring(k):lower()
+            if (lk:find("character") or lk:find("kit") or lk:find("selected") or lk:find("class"))
+               and type(v)=="string" and v:lower():gsub("%s","")=="twotime" then
+                return true
+            end
+        end
+    end
+    for _, child in ipairs(model:GetChildren()) do
+        if child:IsA("StringValue") then
+            local ln = child.Name:lower()
+            if (ln:find("character") or ln:find("kit") or ln:find("selected"))
+               and tostring(child.Value):lower():gsub("%s","")=="twotime" then
+                return true
+            end
+        end
+        -- Equipped Tools DO replicate onto the character model for every
+        -- client to see — if the dagger is a real Tool (not GUI+remote only)
+        -- this catches it. Harmless if it never matches.
+        if child:IsA("Tool") and child.Name:lower():find("dagger") then
+            return true
+        end
+    end
+    return false
+end
+
+-- Confirmed via in-game Animation Logger — this is the actual dagger
+-- ability animation ID, not a heuristic guess. Playing tracks replicate
+-- to every client (they have to, for you to visually see other players
+-- animate), so this is ground truth: if this ID is playing on a
+-- survivor's Humanoid, the ability is firing RIGHT NOW.
+local TWO_TIME_DAGGER_ANIM_ID = "rbxassetid://100725497418533"
+
+local function isPlayingDaggerAnim(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    local ok, tracks = pcall(function() return hum:GetPlayingAnimationTracks() end)
+    if not ok or not tracks then return false end
+    for _, track in ipairs(tracks) do
+        local anim = track.Animation
+        if anim and anim.AnimationId == TWO_TIME_DAGGER_ANIM_ID then
+            return true
+        end
+    end
+    return false
+end
+
+-- Finds the highest-priority backstab threat: behind you (blind cone),
+-- within danger range OR lunging in from slightly further out.
+local function findBackstabThreat(hrp)
+    local sf = getTeamFolder("Survivors")
+    if not sf then return nil end
+    local char = lp.Character
+    local best, bestScore = nil, -1
+    for _, model in ipairs(sf:GetChildren()) do
+        if model:IsA("Model") and model ~= char then
+            local r = model:FindFirstChild("HumanoidRootPart")
+            local h = model:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health > 0 and (not antiBS.requireKit or isLikelyTwoTime(model)) then
+                local toSurv = r.Position - hrp.Position
+                local dist   = toSurv.Magnitude
+                if dist > 0.1 then
+                    -- Blind-cone check: mirrors the exact math TwoTime's own
+                    -- backstab uses against YOU (isPlayerBehindKiller), just
+                    -- from your perspective now
+                    local dot    = toSurv.Unit:Dot(-hrp.CFrame.LookVector)
+                    local inCone = dot >= math.cos(math.rad(antiBS.coneAngle))
+
+                    -- Lunge detection: velocity component pointed at you,
+                    -- above normal sprint speed — this is the "lunge when
+                    -- dagger" tell. Overrides range slightly since a real
+                    -- lunge closes distance fast and deserves an early react.
+                    local vel = r.AssemblyLinearVelocity or Vector3.zero
+                    local approachSpeed = 0
+                    if vel.Magnitude > 0.5 then
+                        approachSpeed = vel.Unit:Dot((hrp.Position-r.Position).Unit) * vel.Magnitude
+                    end
+                    local lunging = approachSpeed > antiBS.lungeSpeed
+
+                    -- CONFIRMED signal — the dagger animation is actually
+                    -- playing. This bypasses the cone check entirely (by the
+                    -- time you can detect an already-playing animation, you
+                    -- may already be mid-swing on their end) but stays
+                    -- capped to a sane range so we ignore irrelevant activity
+                    -- happening elsewhere on the map.
+                    local abilityFiring = dist <= 20 and isPlayingDaggerAnim(model)
+
+                    local rangeOk = dist <= antiBS.dangerRange
+                        or (lunging and dist <= antiBS.dangerRange*1.6)
+
+                    if abilityFiring or (inCone and rangeOk) then
+                        -- math.max(dot,0.1) keeps the score positive even
+                        -- when abilityFiring bypasses the cone (dot could be
+                        -- low/negative if this is actually a front hit, not
+                        -- a backstab — still fine to turn and face them)
+                        local score = (1/math.max(dist,1)) * math.max(dot,0.1)
+                            * (lunging and 2 or 1) * (abilityFiring and 4 or 1)
+                        if score > bestScore then bestScore=score; best=r end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function toggleAntiBackstab(state)
+    antiBS.enabled = state
+    if antiBS.conn then pcall(function() antiBS.conn:Disconnect() end); antiBS.conn=nil end
+    if not state then antiBS.threatModel=nil; return end
+    antiBS.conn = svc.Run.Heartbeat:Connect(function()
+        if not antiBS.enabled then return end
+        pcall(function()
+            local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+            local hum =char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum or hum.Health<=0 then return end
+
+            local threat = findBackstabThreat(hrp)
+            if threat then
+                antiBS.threatModel  = threat
+                antiBS.lastSeenTime = os.clock()
+                -- Turn to face them — the instant you're no longer facing
+                -- away, their blind-cone requirement for the backstab fails
+                local facePos = Vector3.new(threat.Position.X, hrp.Position.Y, threat.Position.Z)
+                hrp.CFrame = CFrame.new(hrp.Position, facePos)
+            elseif antiBS.threatModel and os.clock()-antiBS.lastSeenTime < 0.5 then
+                -- 0.5s hold on the last known threat position — without this,
+                -- a single frame where they step just outside the cone would
+                -- release facing control and let them slip back in immediately
+                if antiBS.threatModel.Parent then
+                    local hrp2 = antiBS.threatModel:FindFirstChild("HumanoidRootPart")
+                    if hrp2 then
+                        local facePos = Vector3.new(hrp2.Position.X, hrp.Position.Y, hrp2.Position.Z)
+                        hrp.CFrame = CFrame.new(hrp.Position, facePos)
+                    end
+                end
+            else
+                antiBS.threatModel = nil
+            end
+        end)
+    end)
+end
+
+tabAimbot:AddToggle("ABS_Enable", {Title="Enable Anti-Backstab", Default=false})
+    :OnChanged(function(v) toggleAntiBackstab(v) end)
+tabAimbot:AddSlider("ABS_DangerRange", {Title="Danger Range (studs)", Min=6, Max=25, Default=antiBS.dangerRange, Rounding=0})
+    :OnChanged(function(v) antiBS.dangerRange = v end)
+tabAimbot:AddSlider("ABS_ConeAngle", {Title="Blind Cone Angle (°)", Min=30, Max=120, Default=antiBS.coneAngle, Rounding=0})
+    :OnChanged(function(v) antiBS.coneAngle = v end)
+tabAimbot:AddSlider("ABS_LungeSpeed", {Title="Lunge Sensitivity (studs/sec)", Min=15, Max=30, Default=antiBS.lungeSpeed, Rounding=0})
+    :OnChanged(function(v) antiBS.lungeSpeed = v end)
+tabAimbot:AddToggle("ABS_RequireKit", {Title="Require Confirmed Two Time (stricter, may not detect)", Default=false})
+    :OnChanged(function(v) antiBS.requireKit = v end)
+
+-- ============================================================
+-- 5. TWO TIME BACKSTAB
+-- ============================================================
+local tabTwoTime = Window:AddTab({Title="TwoTime", Icon="sword"})
+local secTwoTime = addSection(tabTwoTime, "Backstab Settings")
+
+-- ── Assign to forward-declared upvalue slots ──────────────────
+-- Using plain assignment (no 'local') so the closures in
+-- sections 4 and 4b that already closed over these slots see
+-- the correct values once execution reaches here.
+tt = {
+    enabled          = false,
+    autoStab         = true,
+    doubleStab       = false,   -- NEW: fire dagger twice per trigger
+    triggerFlash     = false,   -- NEW: screen flash on confirmed backstab fire
+    checkCooldown    = true,
+    ignoreStunImmune = true,
+    checkObstacles   = true,
+    snappyTp         = true,
+    range            = 10,
+    behindDist       = 3.5,
+    cooldown         = 30.0,
+    coneAngle        = 70,
+    aimLockTime      = 0.3,
+    lockMode         = "Cam lock + Humanoid lock",
+    -- FIX: start at -30 so the very first use fires immediately
+    -- instead of waiting 30s from script load.
+    lastTrigger      = -30,
+}
+activeBackstabConn = nil
+
+local killerImmunityState = {}
+
+-- ── Internal helpers ──────────────────────────────────────────
+
+local function resetBackstabLock()
+    if activeBackstabConn then
+        pcall(function() activeBackstabConn:Disconnect() end)
+        activeBackstabConn = nil
+    end
+    pcall(function()
+        local char = lp.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.AutoRotate = true end
+    end)
+    ensureTouchGuiVisible()
+end
+
+local function getDaggerButton()
+    local pg        = lp:FindFirstChildOfClass("PlayerGui")
+    local mainUI    = pg and pg:FindFirstChild("MainUI")
+    local container = mainUI and mainUI:FindFirstChild("AbilityContainer")
+    return container and container:FindFirstChild("Dagger")
+end
+
+local function getPing()
+    local ok, v = pcall(function()
+        return svc.Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return (ok and v and v > 0 and v / 1000) or 0.08
+end
+
+-- NOTE: Internal 30s timer is checked by Heartbeat directly.
+-- This function only reads the live game state (UI / attributes).
+local function isDaggerOnCooldown()
+    local btn = getDaggerButton()
+    if btn then
+        for _, name in ipairs({"CooldownTime","Cooldown","CD","Timer","CooldownLabel"}) do
+            local cd = btn:FindFirstChild(name)
+            if cd then
+                if cd:IsA("TextLabel") or cd:IsA("TextBox") then
+                    local val = tonumber(cd.Text:match("[%d%.]+"))
+                    if val and val > 0.05 then return true end
+                elseif cd:IsA("NumberValue") or cd:IsA("IntValue") or cd:IsA("DoubleConstrainedValue") then
+                    if cd.Value > 0.05 then return true end
+                end
+            end
+        end
+        local overlay = btn:FindFirstChild("Overlay") or btn:FindFirstChild("CooldownOverlay")
+        if overlay and overlay:IsA("GuiObject") and overlay.Visible then return true end
+    end
+    local char = lp.Character
+    if char then
+        local cd = char:GetAttribute("DaggerCooldown")
+                or char:GetAttribute("DaggerCD")
+                or char:GetAttribute("StabCooldown")
+        if type(cd) == "number"  and cd    then return true end
+        if type(cd) == "boolean" and cd    then return true end
+    end
+    return false
+end
+
+local function hasLineOfSight(posA, posB, ignoreChar)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {ignoreChar, lp.Character}
+    return svc.WS:Raycast(posA, posB - posA, params) == nil
+end
+
+local function isKillerStunImmune(killer)
+    if not killer or not killer.Parent then return false end
+    local isImmune = false
+
+    local function checkAttrs(obj)
+        if isImmune then return end
+        local ok, attrs = pcall(function() return obj:GetAttributes() end)
+        if not (ok and attrs) then return end
+        for k, v in pairs(attrs) do
+            local lk = tostring(k):lower()
+            if (lk:find("stun") or lk:find("immune") or lk:find("invulner") or lk:find("parry"))
+               and (v == true or v == 1) then
+                isImmune = true; return
+            end
+        end
+    end
+
+    checkAttrs(killer)
+    if not isImmune then
+        local hum = killer:FindFirstChildOfClass("Humanoid")
+        if hum then checkAttrs(hum) end
+    end
+    if not isImmune then
+        for _, cont in ipairs({
+            killer,
+            killer:FindFirstChild("StatusEffects"),
+            killer:FindFirstChild("Effects"),
+            killer:FindFirstChild("Buffs"),
+            killer:FindFirstChild("States"),
+        }) do
+            if cont then
+                for _, child in ipairs(cont:GetChildren()) do
+                    local ln = child.Name:lower()
+                    if ln:find("stunimmune") or ln:find("immunity")
+                       or ln:find("invulner") or ln:find("parry") or ln:find("blocking") then
+                        isImmune=true; break
+                    end
+                end
+            end
+            if isImmune then break end
+        end
+    end
+
+    local prev = killerImmunityState[killer]
+    if prev == nil then
+        killerImmunityState[killer] = isImmune
+        if isImmune then print("Killer stun immunity ENABLE ("..killer.Name..")") end
+    elseif prev ~= isImmune then
+        killerImmunityState[killer] = isImmune
+        print(isImmune
+            and ("Killer stun immunity ENABLE ("..killer.Name..")")
+            or  ("Killer stun immunity DISABLED ("..killer.Name..")"))
+    end
+    return isImmune
+end
+
+-- Passive immunity scanner
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        pcall(function()
+            local kf = getTeamFolder("Killers"); if not kf then return end
+            for _, killer in ipairs(kf:GetChildren()) do
+                if killer:IsA("Model") then isKillerStunImmune(killer) end
+            end
+        end)
+    end
+end)
+
+-- ── fireDaggerAbility ─────────────────────────────────────────
+-- NEW: supports tt.doubleStab — fires the dagger ability twice
+-- with a 180ms gap between hits. Called via task.spawn so
+-- executeBackstab can set up activeBackstabConn in parallel.
+local function fireDaggerAbility()
+    local function doOneFire()
+        local re = getRemoteEvent()
+        if re then
+            pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring("\3\5\0\0\0Dagger")}) end)
+            pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring("\3\4\0\0\0Stab")})   end)
+        end
+        local btn = getDaggerButton()
+        if btn then
+            pcall(function() if btn.Activate then btn:Activate() end end)
+            pcall(function()
+                if type(getconnections)=="function" and btn.MouseButton1Click then
+                    for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do
+                        if conn.Function then pcall(conn.Function) end
+                    end
+                end
+            end)
+            pcall(function() if btn.Activated then btn.Activated:Fire() end end)
+        end
+    end
+
+    doOneFire()
+    -- Screen flash feedback on confirmed stab fire
+    if tt.triggerFlash and doTriggerFlash then task.spawn(doTriggerFlash) end
+    if tt.doubleStab then
+        task.wait(0.18)  -- 180ms between stabs; tight but within server tick tolerance
+        doOneFire()
+    end
+end
+
+-- ── Position helpers ──────────────────────────────────────────
+local function computeBehindCFrame(hrp, khrp)
+    local kCF  = khrp.CFrame
+    local vel  = khrp.AssemblyLinearVelocity or Vector3.zero
+    local lead = math.clamp(getPing() + 0.04, 0.04, 0.2)
+    local pred = kCF.Position
+    if vel.Magnitude > 2 then pred = pred + vel * lead end
+    local behind = pred - kCF.LookVector.Unit * tt.behindDist
+    behind = Vector3.new(behind.X, hrp.Position.Y, behind.Z)
+    return CFrame.new(behind, Vector3.new(pred.X, hrp.Position.Y, pred.Z))
+end
+
+local function isPlayerBehindKiller(hrp, khrp, dist)
+    if dist > tt.range or dist < 0.1 then return false end
+    local dot = (hrp.Position - khrp.Position).Unit:Dot(-khrp.CFrame.LookVector)
+    return dot >= math.cos(math.rad(tt.coneAngle))
+end
+
+-- ── executeBackstab ───────────────────────────────────────────
+--
+-- BUGS FIXED HERE:
+--
+--  BUG 1 (main "stops working" bug):
+--    The old code checked isPlayerBehindKiller() inside the
+--    RenderStepped callback every frame. If the killer
+--    twitched even 1° outside the cone, the check failed,
+--    resetBackstabLock() was called, the connection died, but
+--    tt.lastTrigger had already been set → Heartbeat blocked
+--    for 30s. User had to toggle off/on to reset lastTrigger.
+--    FIX: removed isPlayerBehindKiller from inside the callback.
+--    The connection now runs for the full aimLockTime duration
+--    and exits cleanly via task.defer.
+--
+--  BUG 2 (self-disconnect undefined behaviour):
+--    Calling conn:Disconnect() from inside the conn's own
+--    callback can leave the callback in a half-executed state
+--    on some Roblox executor builds.
+--    FIX: task.defer(resetBackstabLock) defers cleanup to the
+--    next scheduler tick, safely outside the callback.
+--
+--  BUG 3 (double-entry race):
+--    Heartbeat fires every ~1/60 s. Between resetBackstabLock
+--    clearing activeBackstabConn and the new connection being
+--    set (~1 instruction later) there was a 1-frame window
+--    where a second call could slip in.
+--    FIX: guard added in Heartbeat: `if activeBackstabConn then return end`
+-- ─────────────────────────────────────────────────────────────
+local function executeBackstab(killer)
+    -- Clear any previous lock cleanly
+    resetBackstabLock()
+
+    local char = lp.Character
+    local hrp  = char  and char:FindFirstChild("HumanoidRootPart")
+    local hum  = char  and char:FindFirstChildOfClass("Humanoid")
+    local khrp = killer and killer:FindFirstChild("HumanoidRootPart")
+    if not hrp or not khrp then return end
+
+    -- Obstacle check — bail WITHOUT burning cooldown if blocked
+    if tt.checkObstacles and not hasLineOfSight(hrp.Position, khrp.Position, killer) then
+        return
+    end
+
+    if hum then hum.AutoRotate = false end
+    if tt.autoStab then task.spawn(fireDaggerAbility) end
+
+    local startTime = os.clock()
+
+    activeBackstabConn = svc.Run.RenderStepped:Connect(function()
+        local elapsed = os.clock() - startTime
+
+        -- Exit condition: timeout or either character left the world
+        if elapsed >= tt.aimLockTime
+           or not khrp or not khrp.Parent
+           or not hrp  or not hrp.Parent then
+            task.defer(resetBackstabLock)   -- deferred = safe outside callback context
+            return
+        end
+
+        -- Apply chosen lock mode
+        -- NOTE: isPlayerBehindKiller is NOT called here (was BUG 1).
+        -- Once we've committed to a backstab we hold position for
+        -- the full aimLockTime regardless of micro-rotations.
+        local cam      = svc.WS.CurrentCamera
+        local targetCF = computeBehindCFrame(hrp, khrp)
+        local nextCF   = tt.snappyTp and targetCF or hrp.CFrame:Lerp(targetCF, 0.65)
+
+        if tt.lockMode == "Cam lock + Humanoid lock" then
+            hrp.CFrame = nextCF
+            if cam then cam.CFrame = CFrame.new(cam.CFrame.Position, khrp.Position + Vector3.new(0,1.5,0)) end
+
+        elseif tt.lockMode == "Humanoid lock" then
+            hrp.CFrame = nextCF
+
+        elseif tt.lockMode == "Cam lock" then
+            hrp.CFrame = CFrame.new(nextCF.Position, hrp.CFrame.LookVector)
+            if cam then cam.CFrame = CFrame.new(cam.CFrame.Position, khrp.Position + Vector3.new(0,1.5,0)) end
+        end
+    end)
+end
+
+-- ── Heartbeat detection loop ──────────────────────────────────
+-- FIX: `if activeBackstabConn then return end` added (BUG 3 guard).
+-- Cooldown burned here, after the obstacle check inside executeBackstab
+-- returns safely — failed obstacle checks no longer eat the 30s window.
+svc.Run.Heartbeat:Connect(function()
+    if not tt.enabled then return end
+    if activeBackstabConn then return end              -- BUG 3 FIX: no double-entry
+    if os.clock() - tt.lastTrigger < tt.cooldown then return end
+    if tt.checkCooldown and isDaggerOnCooldown()  then return end
+
+    local char = lp.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return end
+
+    local kf = getTeamFolder("Killers"); if not kf then return end
+
+    for _, killer in ipairs(kf:GetChildren()) do
+        local khrp = killer:FindFirstChild("HumanoidRootPart")
+        local khum = killer:FindFirstChildOfClass("Humanoid")
+        if khrp and khum and khum.Health > 0 then
+            if tt.ignoreStunImmune and isKillerStunImmune(killer) then continue end
+            local dist = (khrp.Position - hrp.Position).Magnitude
+            if isPlayerBehindKiller(hrp, khrp, dist) then
+                tt.lastTrigger = os.clock()  -- burn cooldown on valid trigger
+                executeBackstab(killer)
+                break
+            end
+        end
+    end
+end)
+
+-- ── Character / round reset ───────────────────────────────────
+lp.CharacterAdded:Connect(function()
+    resetBackstabLock()
+    tt.lastTrigger          = -30
+    killerImmunityState     = {}
+    aimUnlock()
+    killerAim.lockedModel   = nil
+    killerAim.lockedHRP     = nil
+    killerAim.camActive     = false
+    -- Safety net: if our own character respawns mid-lock, make sure the
+    -- camera doesn't stay stuck in Scriptable with no controller driving it
+    if killerAim.camTookOver then
+        pcall(function() svc.WS.CurrentCamera.CameraType = Enum.CameraType.Custom end)
+        killerAim.camTookOver = false
+    end
+    if staminaEstimate then
+        staminaEstimate.value        = 100
+        staminaEstimate.exhaustStart = nil
+        staminaEstimate.lastTime     = os.clock()
+    end
+    if helper then
+        if helper.killerStamEst then
+            helper.killerStamEst.value    = 110
+            helper.killerStamEst.lastPos  = nil
+            helper.killerStamEst.lastTime = os.clock()
+        end
+        helper.hitsTaken     = 0
+        helper.lastHitTime   = 0
+        helper.lastKnownHP   = 100
+        helper.isNavigating  = false
+        helper.abortNav      = false
+        helper.currentGenTarget = nil
+        helper.killerPrevPos  = nil
+        helper.killerApprVel  = 0
+        helper.killerPrevTime = os.clock()
+        helper.orbitAngle     = 0
+        helper.lastOrbitModel = nil
+        helper.orbitTime      = os.clock()
+        helper.approachHistory = {}
+        helper.distHistory     = {}
+        helper.playState       = "IDLE"
+        -- Re-arm grace period on respawn if Auto Play is already running —
+        -- fresh spawn position means killer distance/approach data is stale
+        if helper.autoPlay then helper.playStartTime = os.clock() end
+        -- Wire hit tracker for the newly spawned character
+        -- NOTE (preserved from original): setupHitTracker is checked as a
+        -- GLOBAL here but defined as a file-local in section 7, so this
+        -- branch never fires — kept exactly as the original behaved.
+        if type(setupHitTracker)=="function" then
+            task.spawn(function()
+                task.wait(0.5)
+                local char=lp.Character
+                if char then setupHitTracker(char) end
+            end)
+        end
+    end
+end)
+
+-- ── TwoTime UI ───────────────────────────────────────────────
+tabTwoTime:AddToggle("TT_AutoBackstab", {Title="Auto Backstab", Default=false})
+    :OnChanged(function(v)
+        tt.enabled = v
+        tt.lastTrigger = -30  -- reset cooldown on every toggle
+        if not v then resetBackstabLock() end
+    end)
+tabTwoTime:AddToggle("TT_AutoStab", {Title="Auto Stab Dagger On TP", Default=true})
+    :OnChanged(function(v) tt.autoStab = v end)
+tabTwoTime:AddToggle("TT_DoubleStab", {Title="Double Auto Stab (fire ×2)", Default=false})
+    :OnChanged(function(v) tt.doubleStab = v end)
+tabTwoTime:AddToggle("TT_SnappyTp", {Title="Snappy Instant TP", Default=true})
+    :OnChanged(function(v) tt.snappyTp = v end)
+tabTwoTime:AddToggle("TT_WallProtect", {Title="Wall / Obstacle Protection", Default=true})
+    :OnChanged(function(v) tt.checkObstacles = v end)
+tabTwoTime:AddToggle("TT_CheckCooldown", {Title="Check Dagger Cooldown (30s)", Default=true})
+    :OnChanged(function(v) tt.checkCooldown = v end)
+tabTwoTime:AddToggle("TT_IgnoreImmune", {Title="Ignore Stun Immune Killers", Default=true})
+    :OnChanged(function(v) tt.ignoreStunImmune = v end)
+local ttLockMode = tabTwoTime:AddDropdown("TT_LockMode", {
+    Title   = "Lock Mode",
+    Values  = {"Cam lock + Humanoid lock", "Cam lock", "Humanoid lock"},
+    Multi   = false,
+    Default = tt.lockMode,
+})
+ttLockMode:OnChanged(function(v) tt.lockMode = v end)
+tabTwoTime:AddSlider("TT_Range", {Title="Trigger Range", Min=3, Max=25, Default=tt.range, Rounding=0})
+    :OnChanged(function(v) tt.range=v end)
+tabTwoTime:AddSlider("TT_BehindDist", {Title="Behind Distance", Min=1, Max=8, Default=tt.behindDist, Rounding=1})
+    :OnChanged(function(v) tt.behindDist=v end)
+tabTwoTime:AddSlider("TT_ConeAngle", {Title="Behind Cone Angle (°)", Min=20, Max=180, Default=tt.coneAngle, Rounding=0})
+    :OnChanged(function(v) tt.coneAngle=v end)
+tabTwoTime:AddSlider("TT_StickyDuration", {Title="Sticky TP Duration (s)", Min=0.1, Max=0.6, Default=0.3, Rounding=2})
+    :OnChanged(function(v) tt.aimLockTime=v end)
+
+-- ============================================================
+-- 6. TWOTIME HUD & FEEDBACK
+-- ============================================================
+
+-- ── Trigger flash ─────────────────────────────────────────────
+local _triggerFlashFrame = nil
+local _triggerFlashGui   = nil
+
+-- Assign to forward-declared upvalue so fireDaggerAbility can call it
+doTriggerFlash = function()
+    pcall(function()
+        local pg = lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        if not _triggerFlashGui or not _triggerFlashGui.Parent then
+            local sg = Instance.new("ScreenGui")
+            sg.Name="BH_TriggerFlash"; sg.ResetOnSpawn=false
+            sg.IgnoreGuiInset=true; sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
+            local frame = Instance.new("Frame")
+            frame.Size=UDim2.new(1,0,1,0); frame.BorderSizePixel=0
+            frame.BackgroundColor3=Color3.fromRGB(255,210,40)
+            frame.BackgroundTransparency=1; frame.Parent=sg
+            _triggerFlashGui=sg; _triggerFlashFrame=frame
+        end
+        local ts = game:GetService("TweenService")
+        _triggerFlashFrame.BackgroundTransparency = 0.55
+        ts:Create(_triggerFlashFrame,
+            TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+            {BackgroundTransparency=1}
+        ):Play()
+    end)
+end
+
+-- ── Cooldown Ready Indicator ──────────────────────────────────
+local cdInd = {
+    enabled = false, gui = nil, dot = nil, label = nil,
+    conn = nil, _tick = 0,
+}
+
+local function buildCdInd()
+    if cdInd.gui then return end
+    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui",5)
+    if not pg then return end
+    local sg = Instance.new("ScreenGui")
+    sg.Name="BH_CdInd"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
+    sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
+    local frame = Instance.new("Frame")
+    frame.Size=UDim2.new(0,160,0,28); frame.Position=UDim2.new(0.5,-80,1,-95)
+    frame.BackgroundColor3=Color3.fromRGB(14,14,20); frame.BackgroundTransparency=0.2
+    frame.BorderSizePixel=0; frame.Active=true; frame.Draggable=true; frame.Parent=sg
+    Instance.new("UICorner",frame).CornerRadius=UDim.new(0,14)
+    local dot = Instance.new("Frame")
+    dot.Size=UDim2.new(0,14,0,14); dot.Position=UDim2.new(0,10,0.5,-7)
+    dot.BackgroundColor3=Color3.fromRGB(255,50,50); dot.BorderSizePixel=0; dot.Parent=frame
+    Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size=UDim2.new(1,-32,1,0); lbl.Position=UDim2.new(0,30,0,0)
+    lbl.BackgroundTransparency=1; lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.TextColor3=Color3.fromRGB(255,160,160); lbl.TextSize=11
+    lbl.Font=Enum.Font.GothamBold; lbl.Text="🗡️ Cooldown..."; lbl.Parent=frame
+    cdInd.gui=sg; cdInd.dot=dot; cdInd.label=lbl
+end
+
+local function toggleCdIndicator(state)
+    cdInd.enabled = state
+    if not state then
+        if cdInd.gui  then pcall(function() cdInd.gui:Destroy()   end); cdInd.gui=nil end
+        if cdInd.conn then pcall(function() cdInd.conn:Disconnect() end); cdInd.conn=nil end
+        return
+    end
+    buildCdInd()
+    if cdInd.conn then pcall(function() cdInd.conn:Disconnect() end) end
+    cdInd.conn = svc.Run.Heartbeat:Connect(function()
+        if not cdInd.enabled or not cdInd.dot or not cdInd.dot.Parent then return end
+        cdInd._tick = cdInd._tick + 1
+        if cdInd._tick % 15 ~= 0 then return end  -- ~4 Hz at 60 fps
+        pcall(function()
+            local timerOk = os.clock() - tt.lastTrigger >= tt.cooldown
+            local uiOk    = not isDaggerOnCooldown()
+            local ready   = timerOk and uiOk
+            cdInd.dot.BackgroundColor3 = ready
+                and Color3.fromRGB(50,255,80) or Color3.fromRGB(255,50,50)
+            if ready then
+                cdInd.label.Text = "🗡️ READY"
+                cdInd.label.TextColor3 = Color3.fromRGB(100,255,120)
+            else
+                local rem = math.max(0, tt.cooldown-(os.clock()-tt.lastTrigger))
+                cdInd.label.Text = string.format("🗡️ %.0fs",rem)
+                cdInd.label.TextColor3 = Color3.fromRGB(255,150,150)
+            end
+        end)
+    end)
+end
+
+-- ── TwoTime Status HUD ────────────────────────────────────────
+local statusHud = {
+    enabled=false, gui=nil, rows={}, conn=nil, _tick=0,
+}
+
+local function buildStatusHud()
+    if statusHud.gui then return end
+    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui",5)
+    if not pg then return end
+    local sg = Instance.new("ScreenGui")
+    sg.Name="BH_StatusHUD"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
+    sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
+    local frame = Instance.new("Frame")
+    frame.Size=UDim2.new(0,178,0,122); frame.Position=UDim2.new(1,-188,0.5,-61)
+    frame.BackgroundColor3=Color3.fromRGB(12,12,18); frame.BackgroundTransparency=0.15
+    frame.BorderSizePixel=1; frame.BorderColor3=Color3.fromRGB(180,40,60)
+    frame.Active=true; frame.Draggable=true; frame.Parent=sg
+    Instance.new("UICorner",frame).CornerRadius=UDim.new(0,8)
+    -- Header bar
+    local hBar=Instance.new("Frame")
+    hBar.Size=UDim2.new(1,0,0,24); hBar.BackgroundColor3=Color3.fromRGB(180,40,60)
+    hBar.BackgroundTransparency=0.3; hBar.BorderSizePixel=0; hBar.Parent=frame
+    Instance.new("UICorner",hBar).CornerRadius=UDim.new(0,8)
+    local hTxt=Instance.new("TextLabel")
+    hTxt.Size=UDim2.new(1,0,1,0); hTxt.BackgroundTransparency=1
+    hTxt.Text="🗡️  TwoTime"; hTxt.TextColor3=Color3.fromRGB(255,220,230)
+    hTxt.TextSize=11; hTxt.Font=Enum.Font.GothamBold; hTxt.Parent=hBar
+    -- Rows
+    statusHud.rows={}
+    for i,name in ipairs({"Dagger","Behind","Range","LOS"}) do
+        local rf=Instance.new("Frame")
+        rf.Size=UDim2.new(1,-8,0,20); rf.Position=UDim2.new(0,4,0,20+(i-1)*22)
+        rf.BackgroundTransparency=1; rf.Parent=frame
+        local nl=Instance.new("TextLabel")
+        nl.Size=UDim2.new(0,55,1,0); nl.BackgroundTransparency=1; nl.Text=name
+        nl.TextColor3=Color3.fromRGB(175,175,195); nl.TextSize=10
+        nl.Font=Enum.Font.GothamBold; nl.TextXAlignment=Enum.TextXAlignment.Left; nl.Parent=rf
+        local dot=Instance.new("Frame")
+        dot.Size=UDim2.new(0,10,0,10); dot.Position=UDim2.new(0,56,0.5,-5)
+        dot.BackgroundColor3=Color3.fromRGB(255,50,50); dot.BorderSizePixel=0; dot.Parent=rf
+        Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+        local vl=Instance.new("TextLabel")
+        vl.Size=UDim2.new(1,-72,1,0); vl.Position=UDim2.new(0,72,0,0)
+        vl.BackgroundTransparency=1; vl.Text="---"
+        vl.TextColor3=Color3.fromRGB(255,100,100); vl.TextSize=10
+        vl.Font=Enum.Font.GothamBold; vl.TextXAlignment=Enum.TextXAlignment.Left; vl.Parent=rf
+        statusHud.rows[name]={dot=dot,val=vl}
+    end
+    statusHud.gui=sg
+end
+
+local function setRow(name,good,text)
+    local r=statusHud.rows[name]; if not r then return end
+    r.dot.BackgroundColor3 = good and Color3.fromRGB(50,255,80) or Color3.fromRGB(255,50,50)
+    r.val.TextColor3 = good and Color3.fromRGB(100,255,120) or Color3.fromRGB(255,100,100)
+    r.val.Text = text
+end
+
+local function toggleStatusHud(state)
+    statusHud.enabled = state
+    if not state then
+        if statusHud.gui  then pcall(function() statusHud.gui:Destroy()   end)
+            statusHud.gui=nil; statusHud.rows={} end
+        if statusHud.conn then pcall(function() statusHud.conn:Disconnect() end); statusHud.conn=nil end
+        return
+    end
+    buildStatusHud()
+    if statusHud.conn then pcall(function() statusHud.conn:Disconnect() end) end
+    statusHud.conn = svc.Run.Heartbeat:Connect(function()
+        if not statusHud.enabled or not statusHud.gui or not statusHud.gui.Parent then return end
+        statusHud._tick = statusHud._tick+1
+        if statusHud._tick % 6 ~= 0 then return end  -- ~10 Hz
+        pcall(function()
+            -- Dagger row
+            local tOk  = os.clock()-tt.lastTrigger >= tt.cooldown
+            local uOk  = not isDaggerOnCooldown()
+            local rdy  = tOk and uOk
+            local rem  = math.max(0, tt.cooldown-(os.clock()-tt.lastTrigger))
+            setRow("Dagger", rdy, rdy and "READY" or string.format("%.0fs",rem))
+            -- Spatial rows
+            local char = lp.Character
+            local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+            local kf   = getTeamFolder("Killers")
+            if not hrp or not kf then
+                setRow("Behind",false,"?"); setRow("Range",false,"?"); setRow("LOS",false,"?")
+                return
+            end
+            local khrp,kd=nil,math.huge
+            for _,killer in ipairs(kf:GetChildren()) do
+                local r=killer:FindFirstChild("HumanoidRootPart")
+                if r then local d=(r.Position-hrp.Position).Magnitude
+                    if d<kd then kd=d; khrp=r end end
+            end
+            if not khrp then
+                setRow("Behind",false,"NO KILLER"); setRow("Range",false,"---"); setRow("LOS",false,"---")
+                return
+            end
+            local dist   = (khrp.Position-hrp.Position).Magnitude
+            local behind = isPlayerBehindKiller(hrp,khrp,dist)
+            local inRng  = dist <= tt.range
+            local los    = hasLineOfSight(hrp.Position, khrp.Position, khrp.Parent)
+            setRow("Behind", behind, behind and "YES ✓" or "FRONT")
+            setRow("Range",  inRng,  string.format("%.1fm",dist))
+            setRow("LOS",    los,    los and "CLEAR" or "BLOCKED")
+        end)
+    end)
+end
+
+-- ── Add HUD section to TwoTime tab (tab already created in section 5) ──
+local secTwoTimeHUD = addSection(tabTwoTime, "HUD & Feedback")
+tabTwoTime:AddToggle("TT_CdIndicator", {Title="Cooldown Ready Indicator", Default=false})
+    :OnChanged(function(v) toggleCdIndicator(v) end)
+tabTwoTime:AddToggle("TT_TriggerFlash", {Title="Trigger Flash on Fire", Default=false})
+    :OnChanged(function(v) tt.triggerFlash=v end)
+tabTwoTime:AddToggle("TT_StatusHud", {Title="TwoTime Status HUD", Default=false})
+    :OnChanged(function(v) toggleStatusHud(v) end)
+
+-- ============================================================
+-- 7. HELPER TAB (Noob auto-play system)
+-- ============================================================
+local tabHelper = Window:AddTab({Title="Helper", Icon="zap"})
+local PathSvc   = game:GetService("PathfindingService")
+local TweenSvc  = game:GetService("TweenService")
+
+-- ── Stamina reader — tries 5 strategies, falls back to estimation ─
+-- Assign to forward-declared upvalue
+staminaEstimate = {
+    value        = 100,
+    lastTime     = os.clock(),
+    exhaustStart = nil,
+    lastSprint   = false,
+}
+
+local function readStamina()
+    local char = lp.Character
+    if not char then return staminaEstimate.value end
+    -- 1. direct attribute
+    local v = char:GetAttribute("Stamina") or char:GetAttribute("Stam")
+    if type(v)=="number" then return v end
+    -- 2. child ValueBase
+    local sv = char:FindFirstChild("Stamina") or char:FindFirstChild("Stam")
+    if sv and sv:IsA("NumberValue") then return sv.Value end
+    -- 3. Stats folder
+    local stats=char:FindFirstChild("Stats")
+    if stats then local s2=stats:FindFirstChild("Stamina"); if s2 then return s2.Value end end
+    -- 4. Humanoid attribute
+    local hum=char:FindFirstChildOfClass("Humanoid")
+    if hum then local hv=hum:GetAttribute("Stamina"); if type(hv)=="number" then return hv end end
+    -- 5. Estimate from sprint state + elapsed time
+    local now = os.clock()
+    local dt  = math.min(now - staminaEstimate.lastTime, 0.2)
+    staminaEstimate.lastTime = now
+    local isSprinting = hum and hum.WalkSpeed > 18
+    if isSprinting then
+        staminaEstimate.value = math.max(0, staminaEstimate.value - 10*dt)
+        if staminaEstimate.value <= 0 and not staminaEstimate.exhaustStart then
+            staminaEstimate.exhaustStart = now
+        end
+    else
+        if staminaEstimate.value <= 0 and staminaEstimate.exhaustStart then
+            if now - staminaEstimate.exhaustStart >= 2 then
+                staminaEstimate.exhaustStart = nil
+                staminaEstimate.value = math.min(100, staminaEstimate.value + 20*dt)
+            end
+        else
+            staminaEstimate.value = math.min(100, staminaEstimate.value + 20*dt)
+        end
+    end
+    return math.floor(staminaEstimate.value)
+end
+
+-- ── Sprint control with hysteresis (fixes 20-21 oscillation) ──
+-- Dynamic floor: 20 emergency | 25 active chase | 30 normal
+-- START: stamina > 55 — dead zone 30-55 holds current state
+local SPRINT_START = 55
+local _curSprint   = false
+
+local function setSprint(shouldSprint)
+    pcall(function()
+        svc.VIM:SendKeyEvent(shouldSprint, Enum.KeyCode.LeftShift, false, game)
+    end)
+end
+
+local function getDynamicFloor(killerDist)
+    if killerDist < 15 then return 20     -- emergency: NEVER hit 0
+    elseif killerDist < 40 then return 25 -- active chase
+    else return 30 end                    -- normal/aware
+end
+
+local function managedSprint(stam, killerDist, force)
+    -- ABSOLUTE GUARD: ≤2 stamina = stop sprint regardless of anything
+    -- The 2s exhaust freeze at 0 is always worse than taking a hit
+    if stam <= 2 then
+        if _curSprint then _curSprint=false; setSprint(false) end
+        return
+    end
+    local stop = getDynamicFloor(killerDist or math.huge)
+    local newState
+    if force ~= nil then
+        newState = force
+    elseif stam < stop then
+        newState = false
+    elseif stam > SPRINT_START then
+        newState = true
+    else
+        newState = _curSprint  -- dead zone: hold, no toggling
+    end
+    if newState ~= _curSprint then
+        _curSprint = newState
+        setSprint(newState)
+    end
+end
+
+-- ── Chat helper ───────────────────────────────────────────────
+local function sendHelperChat(msg)
+    pcall(function()
+        local tcs = game:GetService("TextChatService")
+        local ch  = tcs.TextChannels:FindFirstChild("RBXGeneral")
+        if ch then ch:SendAsync(msg); return end
+        -- Legacy fallback
+        local rs2 = svc.RS:FindFirstChild("DefaultChatSystemChatEvents")
+        if rs2 then
+            local ev = rs2:FindFirstChild("SayMessageRequest")
+            if ev then ev:FireServer(msg,"All") end
+        end
+    end)
+end
+
+-- ── Sentinel finder ───────────────────────────────────────────
+-- Priority: Builderman (dispenser heals) > Dusekkar (shield) > Shedletsky (force field)
+local SENTINEL_PRIORITY = {Builderman=3, Dusekkar=2, Shedletsky=1}
+
+local function findBestSentinel(hrp)
+    local sf = getTeamFolder("Survivors")
+    if not sf then return nil, math.huge end
+    local best, bestScore, bestDist = nil, -1, math.huge
+    for _,model in ipairs(sf:GetChildren()) do
+        if model ~= lp.Character and model:IsA("Model") then
+            local r = model:FindFirstChild("HumanoidRootPart")
+            local h = model:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health > 0 then
+                local d = (r.Position - hrp.Position).Magnitude
+                for sentName, prio in pairs(SENTINEL_PRIORITY) do
+                    if model.Name:lower():find(sentName:lower()) then
+                        -- prefer higher priority, tiebreak by distance
+                        local score = prio * 1000 - d
+                        if score > bestScore then
+                            bestScore=score; best=r.Position; bestDist=d
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return best, bestDist
+end
+
+-- ── Noob ability firers ───────────────────────────────────────
+local function fireNoobAbility(names, btnKeywords)
+    local re = getRemoteEvent()
+    if re then
+        for _,n in ipairs(names) do
+            pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring(n)}) end)
+        end
+    end
+    local pg=lp:FindFirstChildOfClass("PlayerGui")
+    local mainUI=pg and pg:FindFirstChild("MainUI")
+    local container=mainUI and mainUI:FindFirstChild("AbilityContainer")
+    if container then
+        for _,btn in ipairs(container:GetChildren()) do
+            local ln=btn.Name:lower()
+            for _,kw in ipairs(btnKeywords) do
+                if ln:find(kw) then
+                    pcall(function() if btn.Activate then btn:Activate() end end)
+                    pcall(function()
+                        if type(getconnections)=="function" and btn.MouseButton1Click then
+                            for _,c in ipairs(getconnections(btn.MouseButton1Click)) do
+                                if c.Function then pcall(c.Function) end
+                            end
+                        end
+                    end)
+                    break
+                end
+            end
+        end
+    end
+end
+
+local function fireGhostburger()
+    fireNoobAbility({"\3\5\0\0\0Ghost","\3\6\0\0\0Ghostburger"},{"ghost","invis","burger"})
+end
+local function fireBloxyCola()
+    fireNoobAbility({"\3\4\0\0\0Cola","\3\5\0\0\0BloxyCola"},{"cola","bloxy","speed"})
+end
+local function fireSlateskin()
+    fireNoobAbility({"\3\6\0\0\0Slate","\3\7\0\0\0Slateskin"},{"slate","potion","tank","stone"})
+end
+
+-- ── Killer stamina estimator ──────────────────────────────────
+-- Tracks killer velocity each tick, applies known drain/regen
+-- rates to estimate remaining stamina. Accurate within ±8 units.
+local function makeKillerStamEst()
+    return {value=110, lastPos=nil, lastTime=os.clock(), isSprinting=false}
+end
+
+local function updateKillerStam(est, killerHRP)
+    if not killerHRP then return est.value end
+    local now = os.clock()
+    local dt  = math.min(now - est.lastTime, 0.2)
+    est.lastTime = now
+
+    if est.lastPos and dt > 0.001 then
+        local vel = (killerHRP.Position - est.lastPos).Magnitude / dt
+
+        -- Rolling average of last 6 samples to smooth out hit-animation freezes,
+        -- network jitter, and momentary stops (killer winding up to hit)
+        est.velHistory = est.velHistory or {}
+        table.insert(est.velHistory, vel)
+        if #est.velHistory > 6 then table.remove(est.velHistory, 1) end
+        local avgVel = 0
+        for _, v in ipairs(est.velHistory) do avgVel = avgVel + v end
+        avgVel = avgVel / #est.velHistory
+
+        -- Hysteresis on sprint detection (same fix as player stamina floor):
+        -- Confirm sprint at > 18 studs/sec, confirm walk at < 12, hold in dead zone
+        local wasSprinting = est.isSprinting
+        if avgVel > 18 then
+            est.isSprinting = true
+        elseif avgVel < 12 then
+            est.isSprinting = false
+            -- Track when killer transitions from sprint → walk
+            -- This is the window Noob should exploit to create distance
+            if wasSprinting then
+                est.stoppedSprintAt = now
+            end
+        end
+        -- else: hold current state in dead zone (12-18 studs/sec ambiguous zone)
+    end
+
+    est.lastPos = killerHRP.Position
+
+    if est.isSprinting then
+        est.value = math.max(0,   est.value - 9.5 * dt)
+    else
+        est.value = math.min(110, est.value + 21  * dt)
+    end
+    return est.value
+end
+
+-- Returns true if the killer recently stopped sprinting (within last 2.5s)
+-- This is the ideal window to sprint hard and create distance
+local function killerJustStoppedSprinting(est)
+    return est.stoppedSprintAt ~= nil
+        and (os.clock() - est.stoppedSprintAt) < 2.5
+end
+
+-- ── Loop spot scoring ─────────────────────────────────────────
+-- Scans for Model objects and calculates each model's FULL bounding
+-- box across all its solid BaseParts. A jungle gym made of 30 beams
+-- now scores as one 16×16 structure instead of 30 2×2 failures.
+local loopCache = {spots={}, lastUpdate=-30, interval=3}
+
+-- Full AABB of all solid collidable parts inside a model
+local function getModelBB(model)
+    local INF = math.huge
+    local minX,minY,minZ =  INF, INF, INF
+    local maxX,maxY,maxZ = -INF,-INF,-INF
+    local count = 0
+    for _,p in ipairs(model:GetDescendants()) do
+        if p:IsA("BasePart") and p.Transparency < 0.9 and p.CanCollide then
+            local hs  = p.Size * 0.5
+            local pos = p.Position
+            if pos.X-hs.X < minX then minX=pos.X-hs.X end
+            if pos.Y-hs.Y < minY then minY=pos.Y-hs.Y end
+            if pos.Z-hs.Z < minZ then minZ=pos.Z-hs.Z end
+            if pos.X+hs.X > maxX then maxX=pos.X+hs.X end
+            if pos.Y+hs.Y > maxY then maxY=pos.Y+hs.Y end
+            if pos.Z+hs.Z > maxZ then maxZ=pos.Z+hs.Z end
+            count = count + 1
+        end
+    end
+    if count == 0 then return nil end
+    return {
+        size   = Vector3.new(maxX-minX, maxY-minY, maxZ-minZ),
+        center = Vector3.new((minX+maxX)*0.5, (minY+maxY)*0.5, (minZ+maxZ)*0.5),
+        count  = count,
+    }
+end
+
+-- BasePart in the model closest to bb.center (used for BillboardGui anchoring)
+local function findCenterPart(model, center)
+    local best, bestDist = nil, math.huge
+    for _,p in ipairs(model:GetDescendants()) do
+        if p:IsA("BasePart") then
+            local d=(p.Position-center).Magnitude
+            if d<bestDist then bestDist=d; best=p end
+        end
+    end
+    return best
+end
+
+-- ── Loop spot scoring with structure clustering ──────────────
+-- Old version scored one Model at a time — a wall standing 8 studs from
+-- a jungle gym never merged with it, so both got scored (and often
+-- rejected) individually even though together they form one real loop.
+-- New version: collect every candidate structure loosely, then MERGE
+-- any two whose bounding boxes are within `mergeGap` studs of each
+-- other into a single compound group before applying the size filter.
+-- This is what lets "wall right next to the gym" register as one loop.
+local function scoreLoopSpots(hrp, maxCount, killerHRP)
+    local mapRoot = svc.WS:FindFirstChild("Map")
+    if not mapRoot then return {} end
+    local minSize = (helper and helper.minLoopSize) or 14
+
+    -- Step 1: collect loose candidates (basic solid-structure heuristic only)
+    local candidates = {}
+    local function collect(folder, depth)
+        if depth > 6 then return end
+        for _,child in ipairs(folder:GetChildren()) do
+            if child:IsA("Model") then
+                local bb = getModelBB(child)
+                if bb and bb.count >= 2 and bb.size.Y > 4 and bb.size.Y < 50 then
+                    local d = (bb.center - hrp.Position).Magnitude
+                    if d <= 160 then
+                        table.insert(candidates, {model=child, bb=bb})
+                    end
+                end
+                collect(child, depth+1)
+            elseif child:IsA("Folder") then
+                collect(child, depth+1)
+            end
+        end
+    end
+    collect(mapRoot, 0)
+    if #candidates == 0 then return {} end
+
+    -- Step 2: cluster candidates whose AABBs are within mergeGap studs
+    -- (X/Z plane gap between box edges — 0 if already overlapping)
+    local mergeGap = 14
+    local function aabbGap(a, b)
+        local aMinX,aMaxX = a.center.X-a.size.X*0.5, a.center.X+a.size.X*0.5
+        local aMinZ,aMaxZ = a.center.Z-a.size.Z*0.5, a.center.Z+a.size.Z*0.5
+        local bMinX,bMaxX = b.center.X-b.size.X*0.5, b.center.X+b.size.X*0.5
+        local bMinZ,bMaxZ = b.center.Z-b.size.Z*0.5, b.center.Z+b.size.Z*0.5
+        local gapX = math.max(0, math.max(aMinX-bMaxX, bMinX-aMaxX))
+        local gapZ = math.max(0, math.max(aMinZ-bMaxZ, bMinZ-aMaxZ))
+        return math.sqrt(gapX*gapX + gapZ*gapZ)
+    end
+
+    local groups = {}
+    for _,c in ipairs(candidates) do
+        table.insert(groups, {members={c.model}, bb={size=c.bb.size, center=c.bb.center}, count=c.bb.count})
+    end
+
+    local mergedAny = true
+    while mergedAny do
+        mergedAny = false
+        for i=#groups,1,-1 do
+            for j=i-1,1,-1 do
+                if aabbGap(groups[i].bb, groups[j].bb) <= mergeGap then
+                    local gi, gj = groups[i].bb, groups[j].bb
+                    local minX = math.min(gi.center.X-gi.size.X*0.5, gj.center.X-gj.size.X*0.5)
+                    local maxX = math.max(gi.center.X+gi.size.X*0.5, gj.center.X+gj.size.X*0.5)
+                    local minZ = math.min(gi.center.Z-gi.size.Z*0.5, gj.center.Z-gj.size.Z*0.5)
+                    local maxZ = math.max(gi.center.Z+gi.size.Z*0.5, gj.center.Z+gj.size.Z*0.5)
+                    local minY = math.min(gi.center.Y-gi.size.Y*0.5, gj.center.Y-gj.size.Y*0.5)
+                    local maxY = math.max(gi.center.Y+gi.size.Y*0.5, gj.center.Y+gj.size.Y*0.5)
+                    for _,m in ipairs(groups[j].members) do table.insert(groups[i].members, m) end
+                    groups[i].bb = {
+                        size   = Vector3.new(maxX-minX, maxY-minY, maxZ-minZ),
+                        center = Vector3.new((minX+maxX)*0.5, (minY+maxY)*0.5, (minZ+maxZ)*0.5),
+                    }
+                    groups[i].count = groups[i].count + groups[j].count
+                    table.remove(groups, j)
+                    mergedAny = true
+                    break
+                end
+            end
+            if mergedAny then break end
+        end
+    end
+
+    -- Step 3: filter merged groups by final size, score with a size-bias
+    -- so genuinely bigger compound loops rank above small isolated ones
+    local results = {}
+    for _,g in ipairs(groups) do
+        local sx,sz = g.bb.size.X, g.bb.size.Z
+        if sx > minSize and sz > minSize then
+            local d = (g.bb.center - hrp.Position).Magnitude
+            if d <= 150 then
+                local kPenalty = 1
+                if killerHRP then
+                    local kd=(g.bb.center-killerHRP.Position).Magnitude
+                    if kd < 10 then kPenalty = 0.2 end
+                end
+                local perimeter = 2*(sx+sz)
+                local density   = math.min(g.count/6, 2.0)
+                -- Size bias: (perimeter/40)^1.4 rewards bigger structures
+                -- more than proportionally, so a 60-stud compound loop beats
+                -- two disconnected 20-stud ones at similar distance
+                local sizeBias  = (perimeter/40) ^ 1.4
+                -- Anchor = largest single member (used for billboard + orbit identity)
+                local primary, bestVol = g.members[1], 0
+                for _,m in ipairs(g.members) do
+                    local mb = getModelBB(m)
+                    if mb then
+                        local vol = mb.size.X*mb.size.Z
+                        if vol > bestVol then bestVol=vol; primary=m end
+                    end
+                end
+                table.insert(results, {
+                    model    = primary,     -- anchor model for billboard + identity
+                    members  = g.members,   -- ALL models in this compound loop (for ESP)
+                    center   = g.bb.center,
+                    bb       = g.bb,
+                    groupKey = string.format("%.0f_%.0f_%.0f", g.bb.center.X, g.bb.center.Y, g.bb.center.Z),
+                    score    = perimeter * density * sizeBias * (1/math.max(d,1)) * kPenalty,
+                    dist     = d,
+                    size     = sx+sz,
+                })
+            end
+        end
+    end
+
+    table.sort(results, function(a,b) return a.score > b.score end)
+
+    -- Extra dedup safety in case two groups still ended up close post-merge
+    local top, seen = {}, {}
+    for _,r in ipairs(results) do
+        local dup = false
+        for _,s in ipairs(seen) do
+            if (r.center-s).Magnitude < 10 then dup=true; break end
+        end
+        if not dup then
+            table.insert(top, r); table.insert(seen, r.center)
+            if #top >= maxCount then break end
+        end
+    end
+    return top
+end
+
+local function refreshLoopCache(hrp, killerHRP)
+    local now = os.clock()
+    if now - loopCache.lastUpdate < loopCache.interval then return loopCache.spots end
+    loopCache.lastUpdate = now
+    loopCache.spots = scoreLoopSpots(hrp, 5, killerHRP)
+    return loopCache.spots
+end
+
+-- ── Loop ESP marks ────────────────────────────────────────────
+local LOOP_COLORS = {
+    Color3.fromRGB(255,215,0),
+    Color3.fromRGB(160,255,100),
+    Color3.fromRGB(100,210,255),
+}
+
+local function clearLoopMarks()
+    if not helper then return end
+    for _,mark in ipairs(helper.loopMarks) do
+        if mark.hls then
+            for _,hl in ipairs(mark.hls) do
+                pcall(function() if hl and hl.Parent then hl:Destroy() end end)
+            end
+        end
+        pcall(function() if mark.bb and mark.bb.Parent then mark.bb:Destroy() end end)
+    end
+    helper.loopMarks = {}
+end
+
+local function refreshLoopESP()
+    clearLoopMarks()
+    local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local kf=getTeamFolder("Killers"); local khrp=nil
+    if kf then for _,k in ipairs(kf:GetChildren()) do
+        local r=k:FindFirstChild("HumanoidRootPart"); if r then khrp=r; break end
+    end end
+    local spots=scoreLoopSpots(hrp,3,khrp)
+    for i,spot in ipairs(spots) do
+        local color=LOOP_COLORS[i] or LOOP_COLORS[3]
+        local folder=svc.WS:FindFirstChild("BH_LoopMarks")
+            or (function() local f=Instance.new("Folder"); f.Name="BH_LoopMarks"; f.Parent=svc.WS; return f end)()
+        -- Highlight EVERY member model of the compound loop (wall + gym together)
+        local hls = {}
+        for _,member in ipairs(spot.members or {spot.model}) do
+            local hl=Instance.new("Highlight")
+            hl.Adornee=member; hl.FillColor=color; hl.FillTransparency=0.72
+            hl.OutlineColor=color; hl.OutlineTransparency=0
+            hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=folder
+            table.insert(hls, hl)
+        end
+        -- BillboardGui anchored to the part closest to the merged bounding box center
+        local anchorPart = findCenterPart(spot.model, spot.center)
+        local bbGui = nil
+        if anchorPart then
+            bbGui=Instance.new("BillboardGui")
+            bbGui.Adornee=anchorPart; bbGui.Size=UDim2.new(0,150,0,22)
+            bbGui.StudsOffset=Vector3.new(0, spot.bb.size.Y*0.5+3, 0)
+            bbGui.AlwaysOnTop=true; bbGui.Parent=folder
+            local lbl=Instance.new("TextLabel")
+            lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+            lbl.Text=string.format("🔄 LOOP #%d  %.0fst (%dpc)  %.0fm",i,spot.size,#spot.members,spot.dist)
+            lbl.TextColor3=color; lbl.TextStrokeColor3=Color3.new(0,0,0)
+            lbl.TextStrokeTransparency=0; lbl.Font=Enum.Font.GothamBold; lbl.TextSize=11; lbl.Parent=bbGui
+        end
+        table.insert(helper.loopMarks, {hls=hls, bb=bbGui})
+    end
+end
+
+-- ── Orbit position (angle rate-limited) ──────────────────────
+-- When the killer turns, the raw orbit target jumps to the opposite
+-- side of the structure — character cuts straight through the building.
+-- Fix: track orbit angle per-structure and clamp change to ≤60°/sec.
+-- The player now follows the perimeter naturally, never through walls.
+local function getSmoothedOrbitPos(hrp, spot, killerHRP)
+    local center = spot.center
+    local margin = 3.5
+    local rx = spot.bb.size.X*0.5 + margin
+    local rz = spot.bb.size.Z*0.5 + margin
+
+    -- Target angle: directly opposite the killer around the structure center
+    local killerDir = killerHRP
+        and (killerHRP.Position - center).Unit or Vector3.new(1,0,0)
+    local targetAngle = math.atan2(-killerDir.Z, -killerDir.X)
+
+    -- Reset angle if we switched to a different loop structure
+    -- (groupKey is stable across refreshes; spot.model can change if a
+    -- different member becomes "primary" after re-scoring the same group)
+    local now = os.clock()
+    if helper.lastOrbitModel ~= spot.groupKey then
+        helper.lastOrbitModel = spot.groupKey
+        helper.orbitAngle     = targetAngle  -- snap on structure change
+        helper.orbitTime      = now
+    end
+
+    -- Rate-limit: max 60° per second (π/3 rad/s)
+    local dt = math.min(now - (helper.orbitTime or now), 0.5)
+    helper.orbitTime = now
+    local maxStep = (math.pi/3) * dt
+
+    -- Normalize angular difference to [-π, π] for shortest path
+    local diff = targetAngle - helper.orbitAngle
+    diff = diff - math.floor((diff + math.pi) / (2*math.pi)) * (2*math.pi)
+
+    helper.orbitAngle = helper.orbitAngle
+        + math.max(-maxStep, math.min(maxStep, diff))
+
+    -- Project onto structure ellipse
+    local orbitPos = center + Vector3.new(
+        math.cos(helper.orbitAngle) * rx,
+        0,
+        math.sin(helper.orbitAngle) * rz
+    )
+    return Vector3.new(orbitPos.X, hrp.Position.Y, orbitPos.Z)
+end
+
+-- ── Path navigation (fixed timeout memory leak) ───────────────
+local function waitMoveFinished(hum, timeoutSec)
+    local done = false
+    local conn = hum.MoveToFinished:Connect(function() done=true end)
+    local elapsed = 0
+    while not done and elapsed < timeoutSec do
+        -- Check abort EVERY poll (not just between waypoints) so a state
+        -- change can reclaim movement authority within ~0.05s instead of
+        -- waiting out the full 2.5s waypoint timeout
+        if helper and helper.abortNav then break end
+        elapsed = elapsed + task.wait(0.05)
+    end
+    pcall(function() conn:Disconnect() end)
+end
+
+local function navigateTo(hrp, hum, target)
+    if not target then return end
+    if helper and helper.isNavigating then return end  -- no stacking
+    if helper then helper.isNavigating=true; helper.abortNav=false end
+    pcall(function()
+        local path = PathSvc:CreatePath({
+            AgentRadius=2.5, AgentHeight=5.5,
+            AgentCanJump=true, AgentMaxSlope=45,
+            WaypointSpacing=4,
+        })
+        path:ComputeAsync(hrp.Position, target)
+        if path.Status ~= Enum.PathStatus.Success then
+            hum:MoveTo(target)
+        else
+            for _,wp in ipairs(path:GetWaypoints()) do
+                -- Abort if disabled OR killer closed in during travel
+                if not helper or not helper.autoPlay or helper.abortNav then break end
+                if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump=true end
+                hum:MoveTo(wp.Position)
+                waitMoveFinished(hum, 2.5)
+            end
+        end
+    end)
+    if helper then helper.isNavigating=false; helper.abortNav=false end
+end
+
+-- ── Killer approach + targeting confirmation ─────────────────
+-- Old version used ONE raw velocity sample per call — a killer merely
+-- running past while chasing someone else could produce a single noisy
+-- spike that looked identical to "coming for you," triggering LOOP
+-- state and ability gating for no reason.
+-- New version: averages the last 5 approach-velocity samples AND
+-- separately confirms the raw distance is actually net-decreasing over
+-- that same window. Both must agree before we call it a real chase.
+local function updateKillerApproach(hrp, khrp)
+    if not khrp or not helper then return 0, false end
+    local now = os.clock()
+    local dt  = math.min(now - (helper.killerPrevTime or now), 0.3)
+    helper.killerPrevTime = now
+
+    local rawVel = 0
+    if helper.killerPrevPos and dt > 0.01 then
+        local toPlayer    = (hrp.Position - khrp.Position).Unit
+        local killerDelta = khrp.Position - helper.killerPrevPos
+        rawVel = killerDelta:Dot(toPlayer) / dt
+    end
+    helper.killerPrevPos = khrp.Position
+
+    helper.approachHistory = helper.approachHistory or {}
+    table.insert(helper.approachHistory, rawVel)
+    if #helper.approachHistory > 5 then table.remove(helper.approachHistory, 1) end
+    local avgVel = 0
+    for _,v in ipairs(helper.approachHistory) do avgVel = avgVel + v end
+    avgVel = avgVel / #helper.approachHistory
+
+    helper.distHistory = helper.distHistory or {}
+    table.insert(helper.distHistory, (hrp.Position-khrp.Position).Magnitude)
+    if #helper.distHistory > 5 then table.remove(helper.distHistory, 1) end
+    local netClosing = #helper.distHistory >= 3
+        and (helper.distHistory[1] - helper.distHistory[#helper.distHistory]) > 3
+
+    helper.killerApprVel = avgVel
+    -- Confirmed targeting requires BOTH sustained approach velocity AND
+    -- genuinely shrinking distance over the sample window, plus enough
+    -- samples to trust the average (kills spawn-frame false positives too)
+    local isTargetingMe = avgVel > 5 and netClosing and #helper.approachHistory >= 3
+    return avgVel, isTargetingMe
+end
+
+-- ── Hit tracker setup ─────────────────────────────────────────
+-- Monitors HealthChanged to count hits taken in the current encounter.
+-- Used by take-hit regen logic (let killer hit up to 2 times to regen stam).
+local function setupHitTracker(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or not helper then return end
+    helper.lastKnownHP = hum.Health
+    hum.HealthChanged:Connect(function(newHP)
+        if not helper then return end
+        local old = helper.lastKnownHP or newHP
+        -- >5 HP lost = real hit (not ability self-damage noise)
+        if newHP < old - 5 then
+            helper.hitsTaken  = math.min((helper.hitsTaken or 0)+1, 5)
+            helper.lastHitTime = os.clock()
+        end
+        helper.lastKnownHP = newHP
+    end)
+end
+
+-- ── Helper state (assigned to forward-declared upvalue) ───────
+helper = {
+    autoStam   = false, showLoops = false,
+    autoLoop   = false, autoPlay  = false,
+    stamConn   = nil,   loopEspConn=nil,
+    loopConn   = nil,   playConn  = nil,
+    loopMarks  = {},    minLoopSize=14,
+    playState  = "IDLE",
+    -- Noob ability cooldowns
+    lastGhost  = -45, lastCola=-12, lastSlate=-55, lastChat=-30,
+    -- Tick counters
+    _loopFrame = 0, _loopTick=0, _playTick=0,
+    -- Killer stamina estimator
+    killerStamEst = makeKillerStamEst(),
+    -- Hit-regen tracking (take max 2 hits to regen stamina, NEVER exhaust at 0)
+    hitsTaken    = 0,
+    maxHitsRegen = 2,
+    lastHitTime  = 0,
+    lastKnownHP  = 100,
+    -- Navigation guard (prevents simultaneous navigateTo calls stacking)
+    isNavigating    = false,
+    abortNav        = false,
+    currentGenTarget= nil,   -- generator model we're currently heading toward
+    -- Killer approach velocity (studs/sec toward player; positive = approaching)
+    killerPrevPos   = nil,
+    killerPrevTime  = os.clock(),
+    killerApprVel   = 0,
+    approachHistory = {},
+    distHistory     = {},
+    -- Grace period after enabling Auto Play / respawning — abilities and
+    -- LMS/lost-sight detection are suppressed until data has stabilized
+    -- (fixes ability spam firing on bogus spawn-frame readings)
+    playStartTime  = nil,
+    -- Smooth orbit tracking (prevents cutting through structures when killer turns)
+    orbitAngle     = 0,
+    orbitTime      = os.clock(),
+    lastOrbitModel = nil,
+}
+
+-- ── Auto Stamina Management ───────────────────────────────────
+local function toggleAutoStam(state)
+    helper.autoStam = state
+    if helper.stamConn then pcall(function() helper.stamConn:Disconnect() end); helper.stamConn=nil end
+    if not state then managedSprint(100, math.huge, false); return end
+    helper.stamConn = svc.Run.Heartbeat:Connect(function()
+        if not helper.autoStam then return end
+        pcall(function()
+            local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+            local hum=char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum or hum.Health<=0 then return end
+            local kf=getTeamFolder("Killers")
+            local kDist,khrp=math.huge,nil
+            if kf then for _,killer in ipairs(kf:GetChildren()) do
+                local r=killer:FindFirstChild("HumanoidRootPart"); if r then
+                    local d=(r.Position-hrp.Position).Magnitude
+                    if d<kDist then kDist=d; khrp=r end
+                end
+            end end
+            local stam=readStamina()
+            local killerStam = khrp and updateKillerStam(helper.killerStamEst, khrp) or 110
+            local killerAdvantage = killerStam > stam + 15
+            -- Killer just stopped sprinting → sprint hard while their stam regens
+            -- This is the best window to create distance
+            if khrp and killerJustStoppedSprinting(helper.killerStamEst) and kDist < 65 then
+                managedSprint(stam, kDist, stam > 20)
+                return
+            end
+            if killerAdvantage and kDist < 55 then
+                managedSprint(stam, kDist)
+                return
+            end
+            if kDist < 20 then
+                -- Emergency: sprint if above hard floor, NEVER hit 0
+                managedSprint(stam, kDist, stam > 20)
+            elseif kDist < 40 then
+                managedSprint(stam, kDist)   -- active chase: hysteresis
+            elseif kDist < 65 then
+                if stam>60 then managedSprint(stam,kDist,true)
+                elseif stam<40 then managedSprint(stam,kDist,false)
+                else managedSprint(stam,kDist) end
+            else
+                managedSprint(stam, kDist, false)  -- safe: walk + regen
+            end
+        end)
+    end)
+end
+
+-- ── Show Best Loop Spots ──────────────────────────────────────
+local function toggleShowLoops(state)
+    helper.showLoops = state
+    if not state then
+        clearLoopMarks()
+        if helper.loopEspConn then pcall(function() helper.loopEspConn:Disconnect() end); helper.loopEspConn=nil end
+        local folder=svc.WS:FindFirstChild("BH_LoopMarks")
+        if folder then pcall(function() folder:Destroy() end) end
+        return
+    end
+    refreshLoopESP()
+    if helper.loopEspConn then pcall(function() helper.loopEspConn:Disconnect() end) end
+    helper.loopEspConn = svc.Run.Heartbeat:Connect(function()
+        helper._loopFrame = helper._loopFrame+1
+        if helper._loopFrame % 120 ~= 0 then return end  -- refresh every ~2s
+        pcall(refreshLoopESP)
+    end)
+end
+
+-- ── Auto Loop ─────────────────────────────────────────────────
+local function toggleAutoLoop(state)
+    helper.autoLoop = state
+    if helper.loopConn then pcall(function() helper.loopConn:Disconnect() end); helper.loopConn=nil end
+    if not state then return end
+    helper.loopConn = svc.Run.Heartbeat:Connect(function()
+        if not helper.autoLoop then return end
+        helper._loopTick = helper._loopTick+1
+        if helper._loopTick % 6 ~= 0 then return end  -- ~10 Hz
+        pcall(function()
+            local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+            local hum=char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum or hum.Health<=0 then return end
+            local kf=getTeamFolder("Killers"); local khrp=nil; local kDist=math.huge
+            if kf then for _,k in ipairs(kf:GetChildren()) do
+                local r=k:FindFirstChild("HumanoidRootPart"); if r then
+                    local d=(r.Position-hrp.Position).Magnitude
+                    if d<kDist then kDist=d; khrp=r end
+                end
+            end end
+            if kDist > 55 then return end  -- only orbit during active chase
+            local spots=refreshLoopCache(hrp,khrp)
+            if #spots==0 then return end
+            hum:MoveTo(getSmoothedOrbitPos(hrp, spots[1], khrp))
+        end)
+    end)
+end
+
+-- ── Auto Play — full Noob state machine ──────────────────────
+local function getKillerInfo(hrp)
+    local kf=getTeamFolder("Killers"); local kDist,khrp=math.huge,nil
+    if kf then for _,k in ipairs(kf:GetChildren()) do
+        local r=k:FindFirstChild("HumanoidRootPart"); if r then
+            local d=(r.Position-hrp.Position).Magnitude
+            if d<kDist then kDist=d; khrp=r end
+        end
+    end end
+    return kDist, khrp
+end
+
+-- ── Generator completion detection ───────────────────────────
+-- Checks every known signal Forsaken uses to mark a generator done:
+-- attributes (Completed/Solved/Won/Active=false/Status), child BoolValues
+local function isGenCompleted(item)
+    -- Attribute checks
+    if item:GetAttribute("Completed") == true  then return true end
+    if item:GetAttribute("Solved")    == true  then return true end
+    if item:GetAttribute("Won")       == true  then return true end
+    if item:GetAttribute("Active")    == false then return true end
+    local status = item:GetAttribute("Status")
+    if status == "Complete" or status == "Done" or status == "Finished" then return true end
+    -- Child BoolValue/StringValue checks
+    local function checkDescOf(obj)
+        for _, child in ipairs(obj:GetChildren()) do
+            local ln = child.Name:lower()
+            if child:IsA("BoolValue") then
+                if (ln=="completed" or ln=="solved" or ln=="won" or ln=="done") and child.Value then return true end
+                if ln=="active" and not child.Value then return true end
+            end
+            if child:IsA("StringValue") then
+                if ln=="status" and (child.Value=="Complete" or child.Value=="Done") then return true end
+            end
+        end
+        return false
+    end
+    if checkDescOf(item) then return true end
+    if item:IsA("Model") then
+        for _, child in ipairs(item:GetChildren()) do
+            if checkDescOf(child) then return true end
+        end
+    end
+    return false
+end
+
+-- Returns {pos, model} of nearest INCOMPLETE generator, or nil if all done
+local function getNearestIncompleteGen(hrp)
+    local map=svc.WS:FindFirstChild("Map"); if not map then return nil end
+    local best, bestDist, bestModel = nil, math.huge, nil
+    for _,item in ipairs(map:GetDescendants()) do
+        if item.Name=="Generator" or item.Name=="FlowGame" then
+            -- Skip already-completed generators
+            if not isGenCompleted(item) then
+                local pos = item:IsA("BasePart") and item.Position
+                    or (item:IsA("Model") and item.PrimaryPart and item.PrimaryPart.Position)
+                    or (item:IsA("Model") and item:FindFirstChildOfClass("BasePart")
+                        and item:FindFirstChildOfClass("BasePart").Position)
+                if pos then
+                    local d=(pos-hrp.Position).Magnitude
+                    if d<bestDist then bestDist=d; best=pos; bestModel=item end
+                end
+            end
+        end
+    end
+    return best and {pos=best, model=bestModel} or nil
+end
+
+-- ── ProximityPrompt trigger ───────────────────────────────────
+-- Fires the ProximityPrompt on a generator to start the FlowGame.
+-- Tries executor fireproximityprompt first, falls back to Roblox service.
+local function fireProximityPrompt(item)
+    if not item or not item.Parent then return end
+    local prompt
+    for _,desc in ipairs(item:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then prompt=desc; break end
+    end
+    if not prompt then
+        -- Some generators have the prompt on a sibling part
+        local parent = item.Parent
+        if parent then
+            for _,sib in ipairs(parent:GetDescendants()) do
+                if sib:IsA("ProximityPrompt") then prompt=sib; break end
+            end
+        end
+    end
+    if not prompt then return end
+    -- executor function (most executors support this)
+    pcall(function() fireproximityprompt(prompt) end)
+    -- standard Roblox fallback
+    pcall(function() prompt:InputHoldBegin() end)
+    pcall(function()
+        game:GetService("ProximityPromptService"):PromptButtonHoldBegin(prompt)
+    end)
+end
+
+local function toggleAutoPlay(state)
+    helper.autoPlay = state
+    if helper.playConn then pcall(function() helper.playConn:Disconnect() end); helper.playConn=nil end
+    if not state then
+        managedSprint(100, math.huge, false)
+        helper.isNavigating=false; helper.abortNav=false
+        helper.playStartTime = nil
+        return
+    end
+    helper.lastGhost = os.clock()-45
+    helper.lastCola  = os.clock()-12
+    helper.lastSlate = os.clock()-55
+    helper.hitsTaken = 0
+    -- Grace period: abilities + LMS/lost-sight checks are suppressed for
+    -- 6s after enabling. Without this, enabling right at round start
+    -- reads killer distance as "far" and approach history as empty/zero,
+    -- which looked exactly like "killer lost sight" → instant ability spam.
+    helper.playStartTime  = os.clock()
+    helper.approachHistory = {}
+    helper.distHistory     = {}
+    -- Setup hit tracker for the current character
+    task.spawn(function()
+        local char = lp.Character
+        if char then setupHitTracker(char) end
+    end)
+
+    helper.playConn = svc.Run.Heartbeat:Connect(function()
+        if not helper.autoPlay then return end
+        helper._playTick = helper._playTick+1
+        if helper._playTick % 12 ~= 0 then return end  -- ~5 Hz
+        task.spawn(function()
+            pcall(function()
+                local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+                local hum=char and char:FindFirstChildOfClass("Humanoid")
+                if not char or not hrp or not hum or hum.Health<=0 then return end
+                local now        = os.clock()
+                local kDist,khrp = getKillerInfo(hrp)
+                local stam       = readStamina()
+                local killerStam = khrp and updateKillerStam(helper.killerStamEst,khrp) or 110
+                local myHP       = hum.Health
+
+                -- ── Hit counter reset (encounter ended when killer > 40 studs) ──
+                if kDist > 40 and helper.hitsTaken > 0
+                   and now - helper.lastHitTime > 8 then
+                    helper.hitsTaken = 0
+                end
+
+                -- ── Grace period ────────────────────────────────────────────
+                -- First 6s after enabling / respawning: skip abilities and
+                -- targeting-sensitive logic entirely while data stabilizes
+                local inGrace = helper.playStartTime
+                    and (now - helper.playStartTime) < 6
+
+                -- ── Killer approach + confirmed targeting ────────────────────
+                local approachVel, isTargetingMe = updateKillerApproach(hrp, khrp)
+                if inGrace then isTargetingMe = false end
+                local earlyWarning = khrp and kDist < 90 and isTargetingMe
+
+                -- ── NOOB ABILITY AUTOMATION (suppressed during grace) ────────
+                local killerSpr = helper.killerStamEst.isSprinting
+
+                local function isLastManStanding()
+                    local sf = getTeamFolder("Survivors"); if not sf then return false end
+                    local alive = 0
+                    for _, m in ipairs(sf:GetChildren()) do
+                        local h = m:FindFirstChildOfClass("Humanoid")
+                        if h and h.Health > 0 then alive = alive + 1 end
+                    end
+                    return alive <= 1
+                end
+
+                if not inGrace then
+                    -- BLOXY COLA: killer has stamina advantage AND real distance to cover
+                    local killerAdvCola = killerStam > stam + 20
+                    local spotsForCola = refreshLoopCache(hrp, khrp)
+                    local spotDist = #spotsForCola > 0
+                        and (spotsForCola[1].center - hrp.Position).Magnitude or nil
+                    local distanceLong = kDist > 45 or (spotDist and spotDist > 30)
+                    local colaMin = killerSpr and 35 or 25
+                    if killerAdvCola and distanceLong and stam < 70
+                       and kDist > colaMin and now-helper.lastCola >= 12 then
+                        helper.lastCola=now; task.spawn(fireBloxyCola)
+                    end
+
+                    -- SLATESKIN: low STAMINA + safe distance; sprint on natural Speed II expiry
+                    local slateMin = killerSpr and 42 or 30
+                    if stam < 35 and kDist > slateMin and now-helper.lastSlate >= 55 then
+                        helper.lastSlate = now
+                        helper.slateskinEndTime = now + 10
+                        task.spawn(fireSlateskin)
+                    end
+                    if helper.slateskinEndTime and now >= helper.slateskinEndTime then
+                        helper.slateskinEndTime = nil
+                        managedSprint(stam, kDist, stam > 20)
+                    end
+
+                    -- GHOSTBURGER: killer CONFIRMED lost sight (not just far), or pre-LMS
+                    -- Requires enough approach samples so this can't fire on spawn-frame data
+                    local killerLostSight = khrp and #helper.approachHistory >= 3
+                        and approachVel < 2 and kDist > 60
+                    local nearLMS = isLastManStanding()
+                    local ghostMin = killerSpr and 40 or 25
+                    if (killerLostSight or nearLMS) and kDist > ghostMin
+                       and now-helper.lastGhost >= 45 then
+                        helper.lastGhost=now; task.spawn(fireGhostburger)
+                    end
+                end
+
+                -- ── TAKE-HIT REGEN + KILLER WINDOW STRATEGY ──────────────────
+                if khrp and killerJustStoppedSprinting(helper.killerStamEst) and kDist < 65 then
+                    managedSprint(stam, kDist, stam > 20)
+                elseif kDist < 20 and stam <= 25 then
+                    if helper.hitsTaken < helper.maxHitsRegen then
+                        managedSprint(stam, kDist, false)
+                        return
+                    else
+                        managedSprint(stam, kDist, stam > 20)
+                    end
+                else
+                    if kDist < 20 then
+                        managedSprint(stam, kDist, stam > 20)
+                    elseif kDist < 40 then
+                        managedSprint(stam, kDist)
+                    elseif kDist < 65 or earlyWarning then
+                        if stam>60 then managedSprint(stam,kDist,true)
+                        elseif stam<40 then managedSprint(stam,kDist,false)
+                        else managedSprint(stam,kDist) end
+                    else
+                        managedSprint(stam, kDist, false)
+                    end
+                end
+
+                -- ── LOW HP → CHAT + SENTINEL ─────────────────────────────────
+                if not inGrace and myHP < 40 and now-helper.lastChat >= 30 then
+                    helper.lastChat=now
+                    task.spawn(function() sendHelperChat("need help! low hp") end)
+                end
+
+                -- ── KILLER STAMINA ADVANTAGE → SENTINEL SEEK ─────────────────
+                local killerAdvSent = killerStam > stam+15 and kDist < 55
+                if killerAdvSent then
+                    if helper.playState == "GEN" then helper.abortNav = true end
+                    helper.playState = "SENTINEL_SEEK"
+                    local sentPos,sentDist = findBestSentinel(hrp)
+                    if sentPos and sentDist > 8 then
+                        task.spawn(function() navigateTo(hrp,hum,sentPos) end)
+                    end
+                    return
+                end
+
+                -- ── STATE MACHINE (hysteresis bands prevent flapping) ────────
+                -- Enter/exit thresholds are offset from each other so a kDist
+                -- that's merely oscillating near a boundary doesn't flip the
+                -- state every tick — that flipping was what caused the
+                -- constant stop/redirect/die pattern.
+                local prevState = helper.playState
+                local nextState
+                if prevState == "LOOP" then
+                    nextState = (kDist > 48 and not isTargetingMe) and "AWARE" or "LOOP"
+                elseif prevState == "AWARE" then
+                    if kDist < 38 or (isTargetingMe and kDist < 55) then nextState="LOOP"
+                    elseif kDist > 80 and not isTargetingMe then nextState="GEN"
+                    else nextState="AWARE" end
+                else -- GEN, IDLE, or coming out of SENTINEL_SEEK
+                    if kDist < 38 or (isTargetingMe and kDist < 55) then nextState="LOOP"
+                    elseif kDist < 55 or (isTargetingMe and kDist < 70) then nextState="AWARE"
+                    else nextState="GEN" end
+                end
+
+                -- Leaving a navigation-owning state → abort so the new state
+                -- gets sole movement authority instead of fighting the old
+                -- in-flight PathfindingService waypoint loop
+                if nextState ~= prevState and (prevState=="GEN" or prevState=="SENTINEL_SEEK") then
+                    helper.abortNav = true
+                end
+                helper.playState = nextState
+
+                if nextState == "LOOP" then
+                    local spots = refreshLoopCache(hrp, khrp)
+                    -- Only issue MoveTo once navigateTo has actually released
+                    -- the humanoid — prevents two movement commands per tick
+                    if #spots > 0 and not helper.isNavigating then
+                        hum:MoveTo(getSmoothedOrbitPos(hrp, spots[1], khrp))
+                    end
+
+                elseif nextState == "AWARE" then
+                    refreshLoopCache(hrp, khrp)  -- warm cache while there's still time
+
+                else -- GEN
+                    refreshLoopCache(hrp, khrp)
+                    if not helper.isNavigating then
+                        local genInfo = getNearestIncompleteGen(hrp)
+                        if genInfo then
+                            helper.currentGenTarget = genInfo.model
+                            task.spawn(function()
+                                navigateTo(hrp, hum, genInfo.pos)
+                                if helper.currentGenTarget
+                                   and helper.currentGenTarget.Parent then
+                                    local targetPart = helper.currentGenTarget:IsA("BasePart")
+                                        and helper.currentGenTarget
+                                        or helper.currentGenTarget:FindFirstChildOfClass("BasePart")
+                                    local d2 = targetPart
+                                        and (targetPart.Position - hrp.Position).Magnitude or 99
+                                    if d2 < 10 then
+                                        fireProximityPrompt(helper.currentGenTarget)
+                                    end
+                                end
+                                helper.currentGenTarget = nil
+                            end)
+                        end
+                    end
+                end
+            end)
+        end)
+    end)
+end
+
+-- ── Helper UI ─────────────────────────────────────────────────
+local secHelperStam = addSection(tabHelper, "Stamina")
+tabHelper:AddToggle("H_AutoStam", {Title="Auto Stamina Management", Default=false})
+    :OnChanged(function(v) toggleAutoStam(v) end)
+
+local secHelperLoop = addSection(tabHelper, "Looping")
+tabHelper:AddToggle("H_ShowLoops", {Title="Show Best Loop Spots", Default=false})
+    :OnChanged(function(v) toggleShowLoops(v) end)
+tabHelper:AddToggle("H_AutoLoop", {Title="Auto Loop Killer", Default=false})
+    :OnChanged(function(v) toggleAutoLoop(v) end)
+tabHelper:AddSlider("H_MinLoopSize", {Title="Min Loop Size (studs)", Min=10, Max=30, Default=14, Rounding=0})
+    :OnChanged(function(v) helper.minLoopSize=v end)
+
+local secHelperPlay = addSection(tabHelper, "Noob Auto Play")
+tabHelper:AddToggle("H_AutoPlay", {Title="Auto Play (Full Noob AI)", Default=false})
+    :OnChanged(function(v)
+        toggleAutoPlay(v)
+        if v then toggleAutoStam(true); toggleShowLoops(true) end
+    end)
+tabHelper:AddButton({Title="Ghostburger Now",  Callback=function() task.spawn(fireGhostburger) end})
+tabHelper:AddButton({Title="Bloxy Cola Now",   Callback=function() task.spawn(fireBloxyCola)   end})
+tabHelper:AddButton({Title="Slateskin Now",    Callback=function() task.spawn(fireSlateskin)   end})
+tabHelper:AddButton({Title="Request Help Now", Callback=function() task.spawn(function() sendHelperChat("need help!") end) end})
+
+-- ============================================================
+-- 8. INFO & VERSION TAB
+-- ============================================================
+local tabInfo = Window:AddTab({Title="Info", Icon="info"})
+local secInfo = addSection(tabInfo, "Build & Display")
+
+tabInfo:AddToggle("INFO_VersionHud", {Title="Version Display HUD", Default=false})
+    :OnChanged(function(v) toggleVersionHud(v) end)
+tabInfo:AddButton({
+    Title = "Show Script Version",
+    Callback = function()
+        Fluent:Notify({
+            Title   = "BetrayalHub Custom",
+            Content = "Version: "..SCRIPT_VERSION
+                .. "\nTwoTime: Backstab | Double Stab | Status HUD | CD Indicator | Flash"
+                .. "\nAimbot: Survivor | Elliot Predictive | Smart Killer (Injured/Downed)"
+                .. "\nHelper: Noob AI | Stamina (hysteresis) | Loop ESP | Auto Loop | Auto Play"
+                .. "\nFixes: 6 bugs patched + stamina hysteresis + path timeout leak",
+            Duration = 8,
+        })
+    end
+})
+
+-- ============================================================
+-- 9. APPEARANCE & THEME TAB (Space Command Center)
+-- ============================================================
+local tabAppearance = Window:AddTab({Title="Appearance", Icon="rocket"})
+
+-- Bootstrap theme engine BEFORE building controls so defaults
+-- reflect the saved theme file
+Theme.gui = findFluentRootGui(_preGuis, _guiParents)
+if Theme.gui then detectAccent() end
+loadThemeFile()
+
+tabAppearance:AddParagraph({
+    Title   = "🌌 Space Command Center",
+    Content = "Live theme controls — changes apply instantly across the whole UI and save automatically.\nPresets: Deep Space, Neon Blue, Cosmic Purple, Void, Nebula.",
+})
+
+local secThemePresets = addSection(tabAppearance, "Theme Presets")
+
+presetDropdown = tabAppearance:AddDropdown("TH_Preset", {
+    Title   = "UI Theme Preset",
+    Values  = {"Deep Space", "Neon Blue", "Cosmic Purple", "Void", "Nebula", "Custom"},
+    Multi   = false,
+    Default = Theme.preset,
+})
+presetDropdown:OnChanged(function(v)
+    if not Theme.ready or Theme.syncing then return end
+    if v == "Custom" then return end
+    if v and THEME_PRESETS[v] then
+        applyThemePreset(v)
+        Fluent:Notify({ Title="BetrayalHub", Content="Theme preset applied: "..v, Duration=3 })
+    end
+end)
+
+local secThemeColors = addSection(tabAppearance, "Accent Colors")
+
+-- Colorpicker compatibility helper (covers both spellings across builds)
+local function addColorPickerCompat(tab, id, cfg)
+    local ok, picker = pcall(function() return tab:AddColorpicker(id, cfg) end)
+    if ok and picker then return picker end
+    ok, picker = pcall(function() return tab:AddColorPicker(id, cfg) end)
+    if ok and picker then return picker end
+    return nil
+end
+
+accentPicker = addColorPickerCompat(tabAppearance, "TH_Accent", {
+    Title   = "Primary Accent (cyan)",
+    Default = Theme.accent,
+})
+if accentPicker then
+    accentPicker:OnChanged(function()
+        if not Theme.ready or Theme.syncing then return end
+        local v = accentPicker.Value
+        if v then Theme.accent = v end
+        Theme.preset = "Custom"
+        Theme.syncing = true
+        if presetDropdown then pcall(function() presetDropdown:SetValue("Custom") end) end
+        Theme.syncing = false
+        fullSweep(); queueSaveTheme()
+    end)
+end
+
+secondaryPicker = addColorPickerCompat(tabAppearance, "TH_Secondary", {
+    Title   = "Secondary Highlight (purple)",
+    Default = Theme.secondary,
+})
+if secondaryPicker then
+    secondaryPicker:OnChanged(function()
+        if not Theme.ready or Theme.syncing then return end
+        local v = secondaryPicker.Value
+        if v then Theme.secondary = v end
+        Theme.preset = "Custom"
+        Theme.syncing = true
+        if presetDropdown then pcall(function() presetDropdown:SetValue("Custom") end) end
+        Theme.syncing = false
+        fullSweep(); queueSaveTheme()
+    end)
+end
+
+local secThemeGlass = addSection(tabAppearance, "Glass & Transparency")
+
+glassSlider = tabAppearance:AddSlider("TH_Glass", {
+    Title    = "Window Glass Transparency",
+    Min      = 0,
+    Max      = 25,
+    Default  = math.floor(Theme.transparency * 100 + 0.5),
+    Rounding = 0,
+})
+glassSlider:OnChanged(function(v)
+    if not Theme.ready or Theme.syncing then return end
+    Theme.transparency = math.clamp((v or 0) / 100, 0, 0.25)
+    fullSweep(); queueSaveTheme()
+end)
+
+local secThemeActions = addSection(tabAppearance, "Actions")
+
+tabAppearance:AddButton({
+    Title = "Re-apply Theme",
+    Callback = function()
+        fullSweep()
+        Fluent:Notify({ Title="BetrayalHub", Content="Theme re-applied to the whole UI.", Duration=3 })
+    end
+})
+tabAppearance:AddButton({
+    Title = "Reset Theme (Deep Space)",
+    Callback = function()
+        Theme.transparency = 0
+        Theme.syncing = true
+        if glassSlider then pcall(function() glassSlider:SetValue(0) end) end
+        Theme.syncing = false
+        applyThemePreset("Deep Space")
+        Fluent:Notify({ Title="BetrayalHub", Content="Theme reset to Deep Space.", Duration=3 })
+    end
+})
+
+-- ── Activate the theme engine ─────────────────────────────────
+if Theme.gui then
+    -- Paint elements created from now on (dropdown lists, notifications…)
+    Theme.gui.DescendantAdded:Connect(function(inst)
+        pcall(themeInstance, inst)
+        task.delay(0.35, function() pcall(themeInstance, inst) end)
+    end)
+    -- Initial paint of the entire UI
+    fullSweep()
+else
+    print("[BetrayalHub] Theme engine: Fluent root GUI not located — theme controls inactive this session.")
+end
+
+Theme.ready = true
+
+-- Low-frequency re-paint sweep: keeps dynamically recolored elements
+-- (toggle-on pills, hover states, newly opened dropdowns) on-theme
+task.spawn(function()
+    while true do
+        task.wait(1.25)
+        pcall(fullSweep)
+    end
+end)
+
+print("BetrayalHub "..SCRIPT_VERSION.." loaded — Killer aimbot rotation smoothing (frame-rate independent slerp) 🔥")
+print("BetrayalHub UI: Fluent — Space Command Center theme active 🌌")
+
+end) -- end pcall
+
+if not success then flashError(err) end
