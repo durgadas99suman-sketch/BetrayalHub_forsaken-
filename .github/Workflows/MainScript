@@ -1,6 +1,6 @@
 print("BetrayalHub Custom loading...")
 
-local SCRIPT_VERSION = "v4.0.2"
+local SCRIPT_VERSION = "v4.0.3"
 
 -- ============================================================
 -- ERROR HANDLER
@@ -518,6 +518,55 @@ local Window = Fluent:CreateWindow({
     MinimizeKeybind = Enum.KeyCode.L,
 })
 
+-- ── Mobile menu button ───────────────────────────────────────
+local function addMobileMenuButton()
+    if not svc.Input.TouchEnabled then return end
+    pcall(function()
+        local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
+        if not pg then return end
+        local old = pg:FindFirstChild("BetrayalHub_MobileMenu")
+        if old then old:Destroy() end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "BetrayalHub_MobileMenu"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+        gui.Parent = pg
+
+        local button = Instance.new("TextButton")
+        button.Name = "OpenMenu"
+        button.AnchorPoint = Vector2.new(1, 0)
+        button.Position = UDim2.new(1, -16, 0, 74)
+        button.Size = UDim2.fromOffset(54, 54)
+        button.BackgroundColor3 = Color3.fromRGB(18, 24, 38)
+        button.BackgroundTransparency = 0.12
+        button.Text = "☰"
+        button.TextSize = 24
+        button.TextColor3 = Color3.fromRGB(230, 245, 255)
+        button.Font = Enum.Font.GothamBold
+        button.AutoButtonColor = true
+        button.Active = true
+        button.Parent = gui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 14)
+        corner.Parent = button
+        local stroke = Instance.new("UIStroke")
+        stroke.Thickness = 1.5
+        stroke.Color = Color3.fromRGB(0, 195, 255)
+        stroke.Transparency = 0.1
+        stroke.Parent = button
+
+        button.Activated:Connect(function()
+            pcall(function()
+                if type(Window.Minimize) == "function" then Window:Minimize() end
+            end)
+        end)
+    end)
+end
+addMobileMenuButton()
+
 -- ============================================================
 -- VERSION HUD
 -- ============================================================
@@ -710,7 +759,7 @@ tabESP:AddToggle("ESP_Generators", {Title="Generators ESP", Default=true})
 local tabGen = Window:AddTab({Title="Generator", Icon="circuit-board"})
 local secGen = addSection(tabGen, "Auto Solve")
 
-local genState = {enabled=false, nodeDelay=0.03, lineDelay=0.4}
+local genState = {enabled=false, nodeDelay=0.1, lineDelay=0.1}
 
 local function flowKey(n) return n.row.."-"..n.col end
 
@@ -799,8 +848,11 @@ end)
 
 tabGen:AddToggle("GEN_AutoSolve", {Title="Auto Solve Generator", Default=false})
     :OnChanged(function(v) genState.enabled=v end)
-tabGen:AddSlider("GEN_NodeSpeed", {Title="Node Speed", Min=0.01, Max=0.2, Default=genState.nodeDelay, Rounding=2})
+tabGen:AddSlider("GEN_WireDelay", {Title="Wire Delay", Min=0.1, Max=1, Default=genState.nodeDelay, Rounding=1})
     :OnChanged(function(v) genState.nodeDelay=v end)
+
+tabGen:AddSlider("GEN_LineDelay", {Title="Finish Delay", Min=0.1, Max=1, Default=genState.lineDelay, Rounding=1})
+    :OnChanged(function(v) genState.lineDelay=v end)
 
 -- ============================================================
 -- 3. INFINITE STAMINA
@@ -2388,8 +2440,46 @@ end
 local SPRINT_START = 55
 local _curSprint   = false
 
+local mobileSprintButton = nil
+local mobileSprintScannedAt = 0
+
+local function findMobileSprintButton()
+    if not svc.Input.TouchEnabled then return nil end
+    local now = os.clock()
+    if mobileSprintButton and mobileSprintButton.Parent and now - mobileSprintScannedAt < 2 then
+        return mobileSprintButton
+    end
+    mobileSprintScannedAt = now
+    mobileSprintButton = nil
+    local pg = lp:FindFirstChildOfClass("PlayerGui")
+    local roots = {}
+    local tg = pg and pg:FindFirstChild("TouchGui")
+    if tg then table.insert(roots, tg) end
+    if pg then table.insert(roots, pg) end
+    for _,root in ipairs(roots) do
+        for _,obj in ipairs(root:GetDescendants()) do
+            if obj:IsA("GuiButton") then
+                local n = string.lower(obj.Name or "")
+                local t = string.lower((obj:IsA("TextButton") and obj.Text) or "")
+                if n:find("sprint", 1, true) or n:find("run", 1, true)
+                   or t:find("sprint", 1, true) or t:find("run", 1, true) then
+                    mobileSprintButton = obj
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function setSprint(shouldSprint)
     pcall(function()
+        if svc.Input.TouchEnabled then
+            ensureTouchGuiVisible()
+            local button = findMobileSprintButton()
+            if button then button:Activate() end
+            return
+        end
         svc.VIM:SendKeyEvent(shouldSprint, Enum.KeyCode.LeftShift, false, game)
     end)
 end
@@ -2948,8 +3038,15 @@ local function updateKillerApproach(hrp, khrp)
     -- Confirmed targeting requires BOTH sustained approach velocity AND
     -- genuinely shrinking distance over the sample window, plus enough
     -- samples to trust the average (kills spawn-frame false positives too)
-    local isTargetingMe = avgVel > 5 and netClosing and #helper.approachHistory >= 3
-    return avgVel, isTargetingMe
+    local samplesReady = #helper.approachHistory >= 3
+    local enterTarget = samplesReady and avgVel > 7 and netClosing
+    local exitTarget  = (not samplesReady) or avgVel < 2 or not netClosing
+    if helper.targetingLatched then
+        if exitTarget then helper.targetingLatched = false end
+    elseif enterTarget then
+        helper.targetingLatched = true
+    end
+    return avgVel, helper.targetingLatched
 end
 
 -- ── Hit tracker setup ─────────────────────────────────────────
@@ -3004,6 +3101,11 @@ helper = {
     -- LMS/lost-sight detection are suppressed until data has stabilized
     -- (fixes ability spam firing on bogus spawn-frame readings)
     playStartTime  = nil,
+    stateSince       = 0,
+    stateHold        = 0.35,
+    targetingLatched = false,
+    playBusy         = false,
+    lastGenScan      = -30,
     -- Smooth orbit tracking (prevents cutting through structures when killer turns)
     orbitAngle     = 0,
     orbitTime      = os.clock(),
@@ -3015,8 +3117,12 @@ local function toggleAutoStam(state)
     helper.autoStam = state
     if helper.stamConn then pcall(function() helper.stamConn:Disconnect() end); helper.stamConn=nil end
     if not state then managedSprint(100, math.huge, false); return end
+    if svc.Input.TouchEnabled then ensureTouchGuiVisible() end
+    local tick = 0
     helper.stamConn = svc.Run.Heartbeat:Connect(function()
         if not helper.autoStam then return end
+        tick = tick + 1
+        if tick % 3 ~= 0 then return end
         pcall(function()
             local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
             local hum=char and char:FindFirstChildOfClass("Humanoid")
@@ -3370,11 +3476,18 @@ local function toggleAutoPlay(state)
                     else nextState="GEN" end
                 end
 
-                -- Leaving a navigation-owning state → abort so the new state
-                -- gets sole movement authority instead of fighting the old
-                -- in-flight PathfindingService waypoint loop
-                if nextState ~= prevState and (prevState=="GEN" or prevState=="SENTINEL_SEEK") then
-                    helper.abortNav = true
+                -- Debounce state changes so tiny distance/visibility fluctuations
+                -- do not constantly cancel and restart navigation.
+                local emergencyChange = (nextState == "LOOP" and kDist < 28)
+                if nextState ~= prevState and not emergencyChange
+                   and now - (helper.stateSince or 0) < helper.stateHold then
+                    nextState = prevState
+                end
+                if nextState ~= prevState then
+                    helper.stateSince = now
+                    if prevState=="GEN" or prevState=="SENTINEL_SEEK" then
+                        helper.abortNav = true
+                    end
                 end
                 helper.playState = nextState
 
@@ -3391,24 +3504,29 @@ local function toggleAutoPlay(state)
 
                 else -- GEN
                     refreshLoopCache(hrp, khrp)
-                    if not helper.isNavigating then
+                    local currentTarget = helper.currentGenTarget
+                    local targetValid = currentTarget and currentTarget.Parent and not isGenCompleted(currentTarget)
+                    if not helper.isNavigating and not targetValid and now - (helper.lastGenScan or 0) >= 0.65 then
+                        helper.lastGenScan = now
                         local genInfo = getNearestIncompleteGen(hrp)
                         if genInfo then
                             helper.currentGenTarget = genInfo.model
+                            local targetAtStart = genInfo.model
                             task.spawn(function()
                                 navigateTo(hrp, hum, genInfo.pos)
-                                if helper.currentGenTarget
-                                   and helper.currentGenTarget.Parent then
-                                    local targetPart = helper.currentGenTarget:IsA("BasePart")
-                                        and helper.currentGenTarget
-                                        or helper.currentGenTarget:FindFirstChildOfClass("BasePart")
+                                if targetAtStart and targetAtStart.Parent then
+                                    local targetPart = targetAtStart:IsA("BasePart")
+                                        and targetAtStart
+                                        or targetAtStart:FindFirstChildOfClass("BasePart")
                                     local d2 = targetPart
                                         and (targetPart.Position - hrp.Position).Magnitude or 99
-                                    if d2 < 10 then
-                                        fireProximityPrompt(helper.currentGenTarget)
+                                    if d2 < 10 and not isGenCompleted(targetAtStart) then
+                                        fireProximityPrompt(targetAtStart)
                                     end
                                 end
-                                helper.currentGenTarget = nil
+                                if helper.currentGenTarget == targetAtStart then
+                                    helper.currentGenTarget = nil
+                                end
                             end)
                         end
                     end
@@ -3598,12 +3716,12 @@ Theme.ready = true
 -- (toggle-on pills, hover states, newly opened dropdowns) on-theme
 task.spawn(function()
     while true do
-        task.wait(1.25)
+        task.wait(2.5)
         pcall(fullSweep)
     end
 end)
 
-print("BetrayalHub "..SCRIPT_VERSION.." loaded — Killer aimbot rotation smoothing (frame-rate independent slerp) 🔥")
+print("BetrayalHub "..SCRIPT_VERSION.." loaded — mobile menu + AI debounce + optimized helpers 🔥")
 print("BetrayalHub UI: Fluent — Space Command Center theme active 🌌")
 
 end) -- end pcall
