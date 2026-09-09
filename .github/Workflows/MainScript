@@ -99,7 +99,7 @@ if not UIFramework then error("Failed to load RBUI UIFramework.") end
 
 local Panel = UIFramework.CreatePanel({
     Title = "BetrayalHub Custom",
-    Size = UDim2.new(0.9, 0, 0.85, 0), -- Mobile friendly comfortable size
+    Size = UDim2.new(0.7, 0, 0.85, 0), -- Narrowed width (70%), Height is good to go (85%)
     Theme = "Futuristic",
     Resizable = true,
     MinWidth = 360,
@@ -181,21 +181,53 @@ local function addMobileMenuButton()
             end
         end)
 
-        -- Draggable Logic (Touch & Mouse)
-        local dragging, dragInput, dragStart, startPos
-        local dragOffset = Vector2.zero
-
+        -- Robust Menu Toggle Logic
         local function toggleMenu()
             pcall(function()
-                if Panel and Panel.MainGui then
-                    Panel.MainGui.Enabled = not Panel.MainGui.Enabled
-                elseif Panel and Panel.Gui then
-                    Panel.Gui.Enabled = not Panel.Gui.Enabled
-                elseif type(Panel.Minimize) == "function" then
-                    Panel:Minimize()
+                -- Try to find the GUI element associated with the Panel
+                local uiGui = Panel.Gui or Panel.ScreenGui or Panel.MainGui
+                if not uiGui and type(Panel.GetGui) == "function" then
+                    uiGui = Panel:GetGui()
+                end
+                
+                -- Fallback: search CoreGui and PlayerGui for RBUI ScreenGui
+                if not uiGui then
+                    for _, v in pairs(game:GetService("CoreGui"):GetChildren()) do
+                        if v:IsA("ScreenGui") and (v.Name:match("RBUI") or v.Name:match("UIFramework")) then
+                            uiGui = v; break
+                        end
+                    end
+                end
+                if not uiGui then
+                    local pg = lp:FindFirstChildOfClass("PlayerGui")
+                    if pg then
+                        for _, v in pairs(pg:GetChildren()) do
+                            if v:IsA("ScreenGui") and (v.Name:match("RBUI") or v.Name:match("UIFramework")) then
+                                uiGui = v; break
+                            end
+                        end
+                    end
+                end
+                
+                -- Toggle visibility
+                if uiGui then
+                    uiGui.Enabled = not uiGui.Enabled
+                else
+                    -- Last resort: try calling common toggle/minimize methods
+                    if type(Panel.SetVisible) == "function" then
+                        Panel:SetVisible(not Panel.IsVisible)
+                    elseif type(Panel.Toggle) == "function" then
+                        Panel:Toggle()
+                    elseif type(Panel.Minimize) == "function" then
+                        Panel:Minimize()
+                    end
                 end
             end)
         end
+
+        -- Draggable Logic (Touch & Mouse)
+        local dragging, dragInput, dragStart, startPos
+        local dragOffset = Vector2.zero
 
         btn.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
