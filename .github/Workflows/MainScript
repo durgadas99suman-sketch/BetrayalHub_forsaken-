@@ -1,1391 +1,633 @@
-print("BetrayalHub Custom loading...")
+-- ==============================================================================
+-- ROBLOX SPACE-THEMED VERIFICATION SYSTEM (WITH SCRIPT LOADER)
+-- Backend Target: https://discord-verification-bot-swxy.onrender.com/api/verify-key
+-- Target Script: BetrayalHub MainScript
+-- ==============================================================================
 
-local SCRIPT_VERSION = "v4.0.4 RBUI"
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local Players = game:GetService("Players")
 
--- ============================================================
--- ERROR HANDLER
--- ============================================================
-local function flashError(msg)
-    pcall(function()
-        local player = game:GetService("Players").LocalPlayer
-        local gui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", 5)
-        if not gui then return end
-        local errorGui = Instance.new("ScreenGui")
-        errorGui.Name = "BetrayalHub_Error"
-        errorGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        errorGui.Parent = gui
-        local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0, 450, 0, 80)
-        frame.Position = UDim2.new(0.5, -225, 0.5, -40)
-        frame.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
-        frame.BackgroundTransparency = 0.2
-        frame.BorderSizePixel = 2
-        frame.BorderColor3 = Color3.fromRGB(255, 50, 50)
-        frame.Parent = errorGui
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 8)
-        corner.Parent = frame
-        local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(1, -20, 1, -20)
-        label.Position = UDim2.new(0, 10, 0, 10)
-        label.Text = "⚠️ BetrayalHub Error:\n" .. tostring(msg):sub(1, 150)
-        label.TextColor3 = Color3.fromRGB(255, 200, 200)
-        label.TextScaled = true
-        label.BackgroundTransparency = 1
-        label.Font = Enum.Font.GothamBold
-        label.Parent = frame
-        task.delay(10, function() pcall(function() errorGui:Destroy() end) end)
-    end)
-end
+local LocalPlayer = Players.LocalPlayer or Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
 
-local success, err = pcall(function()
+--------------------------------------------------------------------------------
+-- CONFIGURATION & CONSTANTS
+--------------------------------------------------------------------------------
+local DISCORD_LINK = "https://discord.gg/6js6aY5pVa"
+local VERIFY_ENDPOINT = "https://discord-verification-bot-swxy.onrender.com/api/verify-key"
+local SCRIPT_URL = "https://raw.githubusercontent.com/durgadas99suman-sketch/BetrayalHub-mainscript/refs/heads/main/MainScript"
+local KEY_FILE = "bv_saved_key.txt"
 
--- ============================================================
--- FORWARD DECLARATIONS
--- ============================================================
-local tt                    -- assigned in section 5
-local activeBackstabConn    -- assigned in section 5
-local doTriggerFlash        -- defined in section 6 HUD block
-local staminaEstimate       -- defined in section 7 Helper block
-local helper                -- defined in section 7 Helper block
-local elliotAim             -- assigned in section 4a Elliot Predictive Aimbot
-local setupHitTracker       -- FIX: forward declare so CharacterAdded can see it
-
--- ============================================================
--- SERVICES & LOCAL PLAYER
--- ============================================================
-local svc = {
-    Players = game:GetService("Players"),
-    Run     = game:GetService("RunService"),
-    RS      = game:GetService("ReplicatedStorage"),
-    WS      = game:GetService("Workspace"),
-    VIM     = game:GetService("VirtualInputManager"),
-    Stats   = game:GetService("Stats"),
-    Input   = game:GetService("UserInputService"),
+-- Dark Space Color Palette
+local COLORS = {
+    Background    = Color3.fromRGB(11, 13, 20),
+    CardBg        = Color3.fromRGB(18, 22, 34),
+    CardBorder    = Color3.fromRGB(40, 46, 68),
+    InputBg       = Color3.fromRGB(14, 17, 26),
+    Accent        = Color3.fromRGB(99, 102, 241),       -- Space Indigo
+    AccentHover   = Color3.fromRGB(129, 140, 248),
+    TextPrimary   = Color3.fromRGB(243, 244, 246),
+    TextSecondary = Color3.fromRGB(156, 163, 175),
+    Success       = Color3.fromRGB(34, 197, 94),
+    Error         = Color3.fromRGB(239, 68, 68),
+    Warning       = Color3.fromRGB(234, 179, 8),
 }
-local lp = svc.Players.LocalPlayer
 
--- ── Helpers ──────────────────────────────────────────────────
-local function ensureTouchGuiVisible()
-    pcall(function()
-        local pg = lp:FindFirstChildOfClass("PlayerGui")
-        if not pg then return end
-        local tg = pg:FindFirstChild("TouchGui")
-        if tg then
-            tg.Enabled = true
-            local frame = tg:FindFirstChild("TouchControlFrame")
-            if frame then frame.Visible = true end
+--------------------------------------------------------------------------------
+-- EXECUTOR API & FILE STORAGE COMPATIBILITY LAYER
+--------------------------------------------------------------------------------
+local requestFunc = request or http_request or (syn and syn.request) or (http and http.request)
+
+local function copyToClipboard(text)
+    if setclipboard then
+        setclipboard(text)
+        return true
+    elseif syn and syn.write_clipboard then
+        syn.write_clipboard(text)
+        return true
+    end
+    return false
+end
+
+-- Save key locally to file
+local function saveSavedKey(key)
+    if writefile then
+        pcall(writefile, KEY_FILE, key)
+    end
+end
+
+-- Load locally saved key
+local function getSavedKey()
+    if isfile and readfile and isfile(KEY_FILE) then
+        local ok, data = pcall(readfile, KEY_FILE)
+        if ok and data then
+            return string.gsub(data, "^%s*(.-)%s*$", "%1")
+        end
+    end
+    return nil
+end
+
+-- Delete invalid or expired local key
+local function removeSavedKey()
+    if isfile and delfile and isfile(KEY_FILE) then
+        pcall(delfile, KEY_FILE)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- STATE MACHINE DEFINITION
+--------------------------------------------------------------------------------
+local State = {
+    IDLE = "IDLE",
+    CHECKING = "CHECKING",
+    SUCCESS = "SUCCESS",
+    ERROR = "ERROR"
+}
+
+local currentState = State.IDLE
+local isRequesting = false
+
+--------------------------------------------------------------------------------
+-- UI CONSTRUCTIONS
+--------------------------------------------------------------------------------
+-- Clean up existing instances if script is re-executed
+local targetParent = (gethui and gethui()) or CoreGui or LocalPlayer:WaitForChild("PlayerGui")
+if targetParent:FindFirstChild("SpaceVerificationUI") then
+    targetParent.SpaceVerificationUI:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "SpaceVerificationUI"
+screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999
+screenGui.Parent = targetParent
+
+-- Main Card Frame
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+mainFrame.Size = UDim2.new(0, 380, 0, 470)
+mainFrame.BackgroundColor3 = COLORS.Background
+mainFrame.BackgroundTransparency = 0.05
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Parent = screenGui
+
+local frameCorner = Instance.new("UICorner")
+frameCorner.CornerRadius = UDim.new(0, 16)
+frameCorner.Parent = mainFrame
+
+local frameStroke = Instance.new("UIStroke")
+frameStroke.Color = COLORS.CardBorder
+frameStroke.Thickness = 1.5
+frameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+frameStroke.Parent = mainFrame
+
+-- Top Ambient Accent Line
+local topBarGlow = Instance.new("Frame")
+topBarGlow.Name = "TopBarGlow"
+topBarGlow.Size = UDim2.new(1, 0, 0, 4)
+topBarGlow.BackgroundColor3 = COLORS.Accent
+topBarGlow.BorderSizePixel = 0
+topBarGlow.Parent = mainFrame
+
+-- Header Section
+local headerFrame = Instance.new("Frame")
+headerFrame.Name = "HeaderFrame"
+headerFrame.Size = UDim2.new(1, 0, 0, 70)
+headerFrame.Position = UDim2.new(0, 0, 0, 10)
+headerFrame.BackgroundTransparency = 1
+headerFrame.Parent = mainFrame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Name = "TitleLabel"
+titleLabel.Size = UDim2.new(1, -40, 0, 28)
+titleLabel.Position = UDim2.new(0, 20, 0, 12)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.Text = "Script Access"
+titleLabel.TextColor3 = COLORS.TextPrimary
+titleLabel.TextSize = 20
+titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+titleLabel.Parent = headerFrame
+
+local subtitleLabel = Instance.new("TextLabel")
+subtitleLabel.Name = "SubtitleLabel"
+subtitleLabel.Size = UDim2.new(1, -40, 0, 18)
+subtitleLabel.Position = UDim2.new(0, 20, 0, 40)
+subtitleLabel.BackgroundTransparency = 1
+subtitleLabel.Font = Enum.Font.Gotham
+subtitleLabel.Text = "Verify your account to continue"
+subtitleLabel.TextColor3 = COLORS.TextSecondary
+subtitleLabel.TextSize = 13
+subtitleLabel.TextXAlignment = Enum.TextXAlignment.Center
+subtitleLabel.Parent = headerFrame
+
+-- SECTION 1: Discord Card
+local discordSection = Instance.new("Frame")
+discordSection.Name = "DiscordSection"
+discordSection.Size = UDim2.new(1, -40, 0, 110)
+discordSection.Position = UDim2.new(0, 20, 0, 85)
+discordSection.BackgroundColor3 = COLORS.CardBg
+discordSection.BorderSizePixel = 0
+discordSection.Parent = mainFrame
+
+local discordCorner = Instance.new("UICorner")
+discordCorner.CornerRadius = UDim.new(0, 12)
+discordCorner.Parent = discordSection
+
+local discordStroke = Instance.new("UIStroke")
+discordStroke.Color = COLORS.CardBorder
+discordStroke.Thickness = 1
+discordStroke.Parent = discordSection
+
+local discordHeading = Instance.new("TextLabel")
+discordHeading.Size = UDim2.new(1, -24, 0, 20)
+discordHeading.Position = UDim2.new(0, 12, 0, 10)
+discordHeading.BackgroundTransparency = 1
+discordHeading.Font = Enum.Font.GothamSemibold
+discordHeading.Text = "Join Discord Server"
+discordHeading.TextColor3 = COLORS.TextPrimary
+discordHeading.TextSize = 14
+discordHeading.TextXAlignment = Enum.TextXAlignment.Left
+discordHeading.Parent = discordSection
+
+local discordDesc = Instance.new("TextLabel")
+discordDesc.Size = UDim2.new(1, -24, 0, 32)
+discordDesc.Position = UDim2.new(0, 12, 0, 30)
+discordDesc.BackgroundTransparency = 1
+discordDesc.Font = Enum.Font.Gotham
+discordDesc.Text = "Join our Discord & open a ticket to receive your verification key."
+discordDesc.TextColor3 = COLORS.TextSecondary
+discordDesc.TextSize = 12
+discordDesc.TextWrapped = true
+discordDesc.TextXAlignment = Enum.TextXAlignment.Left
+discordDesc.Parent = discordSection
+
+local discordButton = Instance.new("TextButton")
+discordButton.Name = "DiscordButton"
+discordButton.Size = UDim2.new(1, -24, 0, 34)
+discordButton.Position = UDim2.new(0, 12, 0, 66)
+discordButton.BackgroundColor3 = COLORS.Accent
+discordButton.Font = Enum.Font.GothamBold
+discordButton.Text = "Copy Discord Link"
+discordButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+discordButton.TextSize = 13
+discordButton.AutoButtonColor = false
+discordButton.Parent = discordSection
+
+local discordBtnCorner = Instance.new("UICorner")
+discordBtnCorner.CornerRadius = UDim.new(0, 8)
+discordBtnCorner.Parent = discordButton
+
+-- SECTION 2: Key Verification Card
+local keySection = Instance.new("Frame")
+keySection.Name = "KeySection"
+keySection.Size = UDim2.new(1, -40, 0, 150)
+keySection.Position = UDim2.new(0, 20, 0, 210)
+keySection.BackgroundColor3 = COLORS.CardBg
+keySection.BorderSizePixel = 0
+keySection.Parent = mainFrame
+
+local keyCorner = Instance.new("UICorner")
+keyCorner.CornerRadius = UDim.new(0, 12)
+keyCorner.Parent = keySection
+
+local keyStroke = Instance.new("UIStroke")
+keyStroke.Color = COLORS.CardBorder
+keyStroke.Thickness = 1
+keyStroke.Parent = keySection
+
+local keyHeading = Instance.new("TextLabel")
+keyHeading.Size = UDim2.new(1, -24, 0, 20)
+keyHeading.Position = UDim2.new(0, 12, 0, 10)
+keyHeading.BackgroundTransparency = 1
+keyHeading.Font = Enum.Font.GothamSemibold
+keyHeading.Text = "Verification Key"
+keyHeading.TextColor3 = COLORS.TextPrimary
+keyHeading.TextSize = 14
+keyHeading.TextXAlignment = Enum.TextXAlignment.Left
+keyHeading.Parent = keySection
+
+-- Key Input Field
+local inputFrame = Instance.new("Frame")
+inputFrame.Name = "InputFrame"
+inputFrame.Size = UDim2.new(1, -24, 0, 40)
+inputFrame.Position = UDim2.new(0, 12, 0, 36)
+inputFrame.BackgroundColor3 = COLORS.InputBg
+inputFrame.BorderSizePixel = 0
+inputFrame.Parent = keySection
+
+local inputCorner = Instance.new("UICorner")
+inputCorner.CornerRadius = UDim.new(0, 8)
+inputCorner.Parent = inputFrame
+
+local inputStroke = Instance.new("UIStroke")
+inputStroke.Color = COLORS.CardBorder
+inputStroke.Thickness = 1
+inputStroke.Parent = inputFrame
+
+local keyTextBox = Instance.new("TextBox")
+keyTextBox.Name = "KeyTextBox"
+keyTextBox.Size = UDim2.new(1, -20, 1, 0)
+keyTextBox.Position = UDim2.new(0, 10, 0, 0)
+keyTextBox.BackgroundTransparency = 1
+keyTextBox.Font = Enum.Font.Code
+keyTextBox.PlaceholderText = "Enter your BV- key..."
+keyTextBox.PlaceholderColor3 = COLORS.TextSecondary
+keyTextBox.Text = ""
+keyTextBox.TextColor3 = COLORS.TextPrimary
+keyTextBox.TextSize = 14
+keyTextBox.TextXAlignment = Enum.TextXAlignment.Left
+keyTextBox.ClearTextOnFocus = false
+keyTextBox.Parent = inputFrame
+
+-- Check Key Action Button
+local checkButton = Instance.new("TextButton")
+checkButton.Name = "CheckButton"
+checkButton.Size = UDim2.new(1, -24, 0, 42)
+checkButton.Position = UDim2.new(0, 12, 0, 92)
+checkButton.BackgroundColor3 = COLORS.Accent
+checkButton.Font = Enum.Font.GothamBold
+checkButton.Text = "Check Key"
+checkButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+checkButton.TextSize = 14
+checkButton.AutoButtonColor = false
+checkButton.Parent = keySection
+
+local checkBtnCorner = Instance.new("UICorner")
+checkBtnCorner.CornerRadius = UDim.new(0, 8)
+checkBtnCorner.Parent = checkButton
+
+-- Status Output Area
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.Size = UDim2.new(1, -40, 0, 80)
+statusLabel.Position = UDim2.new(0, 20, 0, 375)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Font = Enum.Font.GothamMedium
+statusLabel.Text = ""
+statusLabel.TextColor3 = COLORS.TextSecondary
+statusLabel.TextSize = 13
+statusLabel.TextWrapped = true
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+statusLabel.Parent = mainFrame
+
+--------------------------------------------------------------------------------
+-- ANIMATIONS & HELPER FUNCTIONS
+--------------------------------------------------------------------------------
+local function tweenObject(object, properties, duration, style, direction)
+    local tweenInfo = TweenInfo.new(
+        duration or 0.25,
+        style or Enum.EasingStyle.Quad,
+        direction or Enum.EasingDirection.Out
+    )
+    local tween = TweenService:Create(object, tweenInfo, properties)
+    tween:Play()
+    return tween
+end
+
+local function applyHoverEffect(button, defaultColor, hoverColor)
+    button.MouseEnter:Connect(function()
+        if not isRequesting then
+            tweenObject(button, {BackgroundColor3 = hoverColor}, 0.2)
+        end
+    end)
+    button.MouseLeave:Connect(function()
+        if not isRequesting then
+            tweenObject(button, {BackgroundColor3 = defaultColor}, 0.2)
         end
     end)
 end
 
-local function getRemoteEvent()
-    local ok, re = pcall(function()
-        return svc.RS.Modules.Network.Network:FindFirstChild("RemoteEvent")
-    end)
-    return ok and re or nil
-end
+applyHoverEffect(discordButton, COLORS.Accent, COLORS.AccentHover)
+applyHoverEffect(checkButton, COLORS.Accent, COLORS.AccentHover)
 
-local function getTeamFolder(name)
-    local root = svc.WS:FindFirstChild("Players")
-    return root and root:FindFirstChild(name)
-end
+-- Entrance Scale Animation
+mainFrame.Size = UDim2.new(0, 0, 0, 0)
+mainFrame.BackgroundTransparency = 1
+tweenObject(mainFrame, {
+    Size = UDim2.new(0, 380, 0, 470),
+    BackgroundTransparency = 0.05
+}, 0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
--- ============================================================
--- RBUI LOADER
--- ============================================================
-local UIFramework = loadstring(game:HttpGet("https://github.com/SS1Dev/RBUI/releases/download/v1.0.0/main.lua"))()
-if not UIFramework then error("Failed to load RBUI UIFramework.") end
+--------------------------------------------------------------------------------
+-- STATE MACHINE CONTROLLER
+--------------------------------------------------------------------------------
+local loadingThread = nil
 
-local Panel = UIFramework.CreatePanel({
-    Title = "BetrayalHub Custom",
-    Size = UDim2.new(0.7, 0, 0.85, 0), -- Narrowed width (70%), Height is good to go (85%)
-    Theme = "Futuristic",
-    Resizable = true,
-    MinWidth = 360,
-    MinHeight = 300,
-    Transparency = 0,
-})
+local function setState(newState, message)
+    currentState = newState
+    statusLabel.Text = message or ""
 
--- Helper for sections
-local function addSection(tab, title)
-    if not tab then return nil end
-    UIFramework.CreateSection({ Text = title, Parent = tab })
-    return true
-end
-
--- ============================================================
--- MOVABLE FLOATING MENU BUTTON (Animated & Not Boring)
--- ============================================================
-local function addMobileMenuButton()
-    pcall(function()
-        local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
-        if not pg then return end
-        local old = pg:FindFirstChild("BetrayalHub_MobileMenu")
-        if old then old:Destroy() end
-
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "BetrayalHub_MobileMenu"
-        gui.ResetOnSpawn = false
-        gui.IgnoreGuiInset = true
-        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        gui.DisplayOrder = 999999
-        gui.Parent = pg
-
-        local btn = Instance.new("TextButton")
-        btn.Name = "OpenMenu"
-        btn.Size = UDim2.new(0, 55, 0, 55)
-        btn.Position = UDim2.new(0, 20, 0.5, 0)
-        btn.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-        btn.BackgroundTransparency = 0.15
-        btn.Text = "✦"
-        btn.TextSize = 28
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.Font = Enum.Font.GothamBlack
-        btn.Parent = gui
-
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(1, 0) -- Circle
-        corner.Parent = btn
-
-        local stroke = Instance.new("UIStroke")
-        stroke.Thickness = 2
-        stroke.Color = Color3.fromRGB(0, 195, 255)
-        stroke.Parent = btn
-
-        local grad = Instance.new("UIGradient")
-        grad.Rotation = 45
-        grad.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 195, 255)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 85, 255))
-        })
-        grad.Parent = stroke
-
-        -- Glow Effect
-        local glow = Instance.new("UIStroke")
-        glow.Thickness = 4
-        glow.Color = Color3.fromRGB(0, 195, 255)
-        glow.Transparency = 0.8
-        glow.Parent = btn
-
-        -- Animation Loop (Spinning back and forth + Pulsing Glow)
-        task.spawn(function()
-            local ts = game:GetService("TweenService")
-            while btn and btn.Parent do
-                ts:Create(btn, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Rotation = 25}):Play()
-                ts:Create(glow, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Transparency = 0.4}):Play()
-                task.wait(1.5)
-                ts:Create(btn, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Rotation = -25}):Play()
-                ts:Create(glow, TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Transparency = 0.8}):Play()
-                task.wait(1.5)
-            end
-        end)
-
-        -- Robust Menu Toggle Logic
-        local function toggleMenu()
-            pcall(function()
-                -- Try to find the GUI element associated with the Panel
-                local uiGui = Panel.Gui or Panel.ScreenGui or Panel.MainGui
-                if not uiGui and type(Panel.GetGui) == "function" then
-                    uiGui = Panel:GetGui()
-                end
-                
-                -- Fallback: search CoreGui and PlayerGui for RBUI ScreenGui
-                if not uiGui then
-                    for _, v in pairs(game:GetService("CoreGui"):GetChildren()) do
-                        if v:IsA("ScreenGui") and (v.Name:match("RBUI") or v.Name:match("UIFramework")) then
-                            uiGui = v; break
-                        end
-                    end
-                end
-                if not uiGui then
-                    local pg = lp:FindFirstChildOfClass("PlayerGui")
-                    if pg then
-                        for _, v in pairs(pg:GetChildren()) do
-                            if v:IsA("ScreenGui") and (v.Name:match("RBUI") or v.Name:match("UIFramework")) then
-                                uiGui = v; break
-                            end
-                        end
-                    end
-                end
-                
-                -- Toggle visibility
-                if uiGui then
-                    uiGui.Enabled = not uiGui.Enabled
-                else
-                    -- Last resort: try calling common toggle/minimize methods
-                    if type(Panel.SetVisible) == "function" then
-                        Panel:SetVisible(not Panel.IsVisible)
-                    elseif type(Panel.Toggle) == "function" then
-                        Panel:Toggle()
-                    elseif type(Panel.Minimize) == "function" then
-                        Panel:Minimize()
-                    end
-                end
-            end)
+    if newState == State.IDLE then
+        isRequesting = false
+        checkButton.Text = "Check Key"
+        checkButton.BackgroundColor3 = COLORS.Accent
+        statusLabel.TextColor3 = COLORS.TextSecondary
+        if loadingThread then
+            task.cancel(loadingThread)
+            loadingThread = nil
         end
 
-        -- Draggable Logic (Touch & Mouse)
-        local dragging, dragInput, dragStart, startPos
-        local dragOffset = Vector2.zero
-
-        btn.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                dragStart = input.Position
-                startPos = btn.Position
-                dragOffset = Vector2.zero
-                input.Changed:Connect(function()
-                    if input.UserInputState == Enum.UserInputState.End then
-                        dragging = false
-                        -- If it was a small movement, treat as click
-                        if dragOffset.Magnitude < 10 then
-                            toggleMenu()
-                        end
-                    end
-                end)
+    elseif newState == State.CHECKING then
+        isRequesting = true
+        checkButton.BackgroundColor3 = COLORS.CardBorder
+        statusLabel.TextColor3 = COLORS.Warning
+        
+        if loadingThread then task.cancel(loadingThread) end
+        loadingThread = task.spawn(function()
+            local frames = {
+                "📡 Connecting, please wait.",
+                "📡 Connecting, please wait..",
+                "📡 Connecting, please wait..."
+            }
+            local idx = 1
+            while currentState == State.CHECKING do
+                checkButton.Text = "Connecting..."
+                statusLabel.Text = (message and message ~= "" and message) or frames[idx]
+                idx = (idx % #frames) + 1
+                task.wait(0.35)
             end
         end)
-        btn.InputChanged:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-                dragInput = input
-            end
-        end)
-        svc.Input.InputChanged:Connect(function(input)
-            if input == dragInput and dragging then
-                local delta = input.Position - dragStart
-                dragOffset = delta
-                btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-            end
-        end)
-    end)
-end
-addMobileMenuButton()
 
--- ============================================================
--- VERSION HUD
--- ============================================================
-local versionHud = { enabled = false, gui = nil, label = nil, conn = nil, frameCount = 0, lastFpsTime = os.clock(), currentFps = 60 }
+    elseif newState == State.SUCCESS then
+        isRequesting = false
+        if loadingThread then
+            task.cancel(loadingThread)
+            loadingThread = nil
+        end
+        checkButton.Text = "Verified!"
+        checkButton.BackgroundColor3 = COLORS.Success
+        statusLabel.TextColor3 = COLORS.Success
 
-local function getPingMs()
-    local ok, v = pcall(function() return svc.Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    return (ok and v and math.floor(v)) or 0
+    elseif newState == State.ERROR then
+        isRequesting = false
+        if loadingThread then
+            task.cancel(loadingThread)
+            loadingThread = nil
+        end
+        checkButton.Text = "Check Key"
+        checkButton.BackgroundColor3 = COLORS.Accent
+        statusLabel.TextColor3 = COLORS.Error
+    end
 end
 
-local function toggleVersionHud(state)
-    versionHud.enabled = state
-    if not state then
-        if versionHud.gui then pcall(function() versionHud.gui:Destroy() end); versionHud.gui=nil; versionHud.label=nil end
-        if versionHud.conn then pcall(function() versionHud.conn:Disconnect() end); versionHud.conn=nil end
+--------------------------------------------------------------------------------
+-- LOGIC & HANDLERS
+--------------------------------------------------------------------------------
+
+-- Discord Clipboard Handler
+discordButton.MouseButton1Click:Connect(function()
+    local success = copyToClipboard(DISCORD_LINK)
+    local originalText = discordButton.Text
+    if success then
+        discordButton.Text = "Link Copied! Paste in Browser"
+    else
+        discordButton.Text = "Failed to copy"
+    end
+    task.wait(2)
+    discordButton.Text = originalText
+end)
+
+-- Verification Request Executor
+local function verifyKeyProcess(isAutoCheck)
+    -- Multiple Request Lock
+    if isRequesting then
         return
     end
-    if versionHud.gui then return end
-    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
-    if not pg then return end
 
-    local sg = Instance.new("ScreenGui")
-    sg.Name="BetrayalHub_VersionHUD"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true
-    sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
-    local frame = Instance.new("Frame")
-    frame.Size=UDim2.new(0,220,0,32); frame.Position=UDim2.new(0.5,-110,0,10)
-    frame.BackgroundColor3=Color3.fromRGB(18,18,24); frame.BackgroundTransparency=0.25
-    frame.BorderSizePixel=1; frame.BorderColor3=Color3.fromRGB(220,40,60)
-    frame.Parent=sg
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-    local txt=Instance.new("TextLabel")
-    txt.Size=UDim2.new(1,0,1,0); txt.BackgroundTransparency=1
-    txt.Text="✨ BetrayalHub "..SCRIPT_VERSION.." | FPS:60 | Ping:0ms"
-    txt.TextColor3=Color3.fromRGB(255,230,235); txt.TextSize=11
-    txt.Font=Enum.Font.GothamBold; txt.Parent=frame
-    versionHud.gui=sg; versionHud.label=txt
+    local rawText = keyTextBox.Text
+    local trimmedKey = string.gsub(rawText, "^%s*(.-)%s*$", "%1")
 
-    versionHud.conn = svc.Run.RenderStepped:Connect(function()
-        if not versionHud.enabled or not versionHud.label or not versionHud.label.Parent then return end
-        versionHud.frameCount = versionHud.frameCount + 1
-        local now = os.clock()
-        if now - versionHud.lastFpsTime >= 1 then
-            versionHud.currentFps = versionHud.frameCount
-            versionHud.frameCount = 0
-            versionHud.lastFpsTime = now
-        end
-        versionHud.label.Text = string.format("✨ BetrayalHub %s | %d FPS | %dms", SCRIPT_VERSION, versionHud.currentFps, getPingMs())
-    end)
-end
-
--- ============================================================
--- 1. ESP
--- ============================================================
-local tabESP = Panel:AddTab({ Name = "ESP", Icon = "eye" })
-addSection(tabESP, "ESP Settings")
-
-local espState = {
-    enabled = true, showKillers = true, showSurvivors = true, showGenerators = true,
-    highlights = {}, billboards = {}, healthConns = {},
-}
-local COLORS = {
-    Killer = Color3.fromRGB(255, 60, 60), Survivor = Color3.fromRGB(60, 255, 60), Generator = Color3.fromRGB(255, 210, 50),
-}
-
-local function clearESP()
-    for _, hl in pairs(espState.highlights) do if hl and hl.Parent then pcall(function() hl:Destroy() end) end end
-    for _, bb in pairs(espState.billboards) do if bb and bb.Parent then pcall(function() bb:Destroy() end) end end
-    for _, conn in pairs(espState.healthConns) do pcall(function() conn:Disconnect() end) end
-    espState.highlights={}; espState.billboards={}; espState.healthConns={}
-end
-
-local function createESPItem(obj, color, title, isChar)
-    if not obj or not obj.Parent or espState.highlights[obj] then return end
-    local hrp = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChildWhichIsA("BasePart")
-    if not hrp then return end
-
-    local hl = Instance.new("Highlight")
-    hl.Name="BH_ESP_HL"; hl.Adornee=obj; hl.FillColor=color; hl.FillTransparency=0.5
-    hl.OutlineColor=color; hl.OutlineTransparency=0.1
-    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=obj
-
-    local bb = Instance.new("BillboardGui")
-    bb.Name="BH_ESP_BB"; bb.Adornee=hrp; bb.Size=UDim2.new(0,140,0,22)
-    bb.StudsOffset=Vector3.new(0,3.5,0); bb.AlwaysOnTop=true; bb.Parent=obj
-    local lbl = Instance.new("TextLabel")
-    lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
-    lbl.TextColor3=color; lbl.TextStrokeColor3=Color3.new(0,0,0)
-    lbl.TextStrokeTransparency=0.2; lbl.Font=Enum.Font.GothamBold
-    lbl.TextSize=11; lbl.Parent=bb
-
-    espState.highlights[obj] = hl; espState.billboards[obj] = bb
-
-    if isChar then
-        local function updateText()
-            if not obj or not obj.Parent then return end
-            local myChar = lp.Character
-            local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            local dist   = (myHRP and hrp) and string.format("%.0fm",(hrp.Position-myHRP.Position).Magnitude) or ""
-            local hum    = obj:FindFirstChildOfClass("Humanoid")
-            local hp     = hum and string.format("%d HP",math.floor(hum.Health)) or ""
-            lbl.Text = (dist~="" and hp~="") and string.format("%s [%s] (%s)",title,hp,dist) or title
-        end
-        updateText()
-        local hum = obj:FindFirstChildOfClass("Humanoid")
-        if hum then espState.healthConns[obj] = hum.HealthChanged:Connect(updateText) end
-    else
-        lbl.Text = title
+    -- Format Validation
+    if trimmedKey == "" then
+        setState(State.ERROR, "⚠️ Please enter a verification key.")
+        return
     end
-end
 
-local function scanESP()
-    if not espState.enabled then return end
-    for obj in pairs(espState.highlights) do
-        if not obj or not obj.Parent then
-            if espState.highlights[obj] then pcall(function() espState.highlights[obj]:Destroy() end) end
-            if espState.billboards[obj] then pcall(function() espState.billboards[obj]:Destroy() end) end
-            if espState.healthConns[obj] then pcall(function() espState.healthConns[obj]:Disconnect() end) end
-            espState.highlights[obj]=nil; espState.billboards[obj]=nil; espState.healthConns[obj]=nil
-        end
+    if not string.find(trimmedKey, "^BV%-") then
+        removeSavedKey()
+        setState(State.ERROR, "❌ Invalid format. Key must start with 'BV-'.")
+        return
     end
-    if espState.showKillers then
-        local kf=getTeamFolder("Killers")
-        if kf then for _,char in ipairs(kf:GetChildren()) do
-            if char:IsA("Model") and char~=lp.Character then
-                local h=char:FindFirstChildOfClass("Humanoid")
-                if h and h.Health>0 then createESPItem(char,COLORS.Killer,"Killer: "..char.Name,true) end
-            end
-        end end
-    end
-    if espState.showSurvivors then
-        local sf=getTeamFolder("Survivors")
-        if sf then for _,char in ipairs(sf:GetChildren()) do
-            if char:IsA("Model") and char~=lp.Character then
-                local h=char:FindFirstChildOfClass("Humanoid")
-                if h and h.Health>0 then createESPItem(char,COLORS.Survivor,char.Name,true) end
-            end
-        end end
-    end
-    if espState.showGenerators then
-        local map=svc.WS:FindFirstChild("Map")
-        local ingame=map and map:FindFirstChild("Ingame")
-        local mc=ingame and ingame:FindFirstChild("Map")
-        if mc then for _,item in ipairs(mc:GetChildren()) do
-            if item.Name=="Generator" then createESPItem(item,COLORS.Generator,"Generator",false) end
-        end end
-    end
-end
 
-task.spawn(function() while true do task.wait(1); pcall(scanESP) end end)
+    -- Status message configuration
+    local checkingMsg = isAutoCheck 
+        and "📡 Connecting, please wait...\nAuto-checking saved key..." 
+        or "📡 Connecting, please wait...\nValidating key with backend..."
 
-UIFramework.Toggle.new({ Text = "Enable ESP", Icon = "eye", Value = true, Parent = tabESP, OnChange = function(v) espState.enabled=v; if not v then clearESP() else scanESP() end end })
-UIFramework.Toggle.new({ Text = "Killers ESP", Icon = "skull", Value = true, Parent = tabESP, OnChange = function(v) espState.showKillers=v; clearESP(); scanESP() end })
-UIFramework.Toggle.new({ Text = "Survivors ESP", Icon = "users", Value = true, Parent = tabESP, OnChange = function(v) espState.showSurvivors=v; clearESP(); scanESP() end })
-UIFramework.Toggle.new({ Text = "Generators ESP", Icon = "circuit-board", Value = true, Parent = tabESP, OnChange = function(v) espState.showGenerators=v; clearESP(); scanESP() end })
+    setState(State.CHECKING, checkingMsg)
 
--- ============================================================
--- 2. AUTO GENERATOR
--- ============================================================
-local tabGen = Panel:AddTab({ Name = "Generator", Icon = "circuit-board" })
-addSection(tabGen, "Auto Solve")
-
-local genState = { enabled=false, nodeDelay=0.1, lineDelay=0.1 }
-
-local function flowKey(n) return n.row.."-"..n.col end
-local function flowNeighbour(r1,c1,r2,c2)
-    if r2==r1-1 and c2==c1 then return "up" end
-    if r2==r1+1 and c2==c1 then return "down" end
-    if r2==r1 and c2==c1-1 then return "left" end
-    if r2==r1 and c2==c1+1 then return "right" end
-    return false
-end
-
-local function flowOrder(path, endpoints)
-    if not path or #path==0 then return path end
-    local lookup={}
-    for _,n in ipairs(path) do lookup[flowKey(n)]=n end
-    local start
-    for _,ep in ipairs(endpoints or {}) do
-        for _,n in ipairs(path) do
-            if n.row==ep.row and n.col==ep.col then start={row=ep.row,col=ep.col}; break end
-        end
-        if start then break end
-    end
-    if not start then
-        for _,n in ipairs(path) do
-            local nb=0
-            for _,d in ipairs({{-1,0},{1,0},{0,-1},{0,1}}) do
-                if lookup[(n.row+d[1]).."-"..(n.col+d[2])] then nb=nb+1 end
-            end
-            if nb==1 then start={row=n.row,col=n.col}; break end
-        end
-    end
-    if not start then start={row=path[1].row,col=path[1].col} end
-    local pool,ordered={},{}
-    for _,n in ipairs(path) do pool[flowKey(n)]={row=n.row,col=n.col} end
-    local cur=start
-    table.insert(ordered,{row=cur.row,col=cur.col}); pool[flowKey(cur)]=nil
-    while next(pool) do
-        local moved=false
-        for k,node in pairs(pool) do
-            if flowNeighbour(cur.row,cur.col,node.row,node.col) then
-                table.insert(ordered,{row=node.row,col=node.col})
-                pool[k]=nil; cur=node; moved=true; break
-            end
-        end
-        if not moved then break end
-    end
-    return ordered
-end
-
-local function solveFlow(puzzle)
-    pcall(function()
-        if not puzzle or not puzzle.Solution then return end
-        local indices={}
-        for i=1,#puzzle.Solution do indices[i]=i end
-        for i=#indices,2,-1 do local j=math.random(1,i); indices[i],indices[j]=indices[j],indices[i] end
-        for _,ci in ipairs(indices) do
-            local solution=puzzle.Solution[ci]; if not solution then continue end
-            local ordered=flowOrder(solution, puzzle.targetPairs and puzzle.targetPairs[ci])
-            if not ordered or #ordered==0 then continue end
-            puzzle.paths[ci]={}
-            for _,node in ipairs(ordered) do
-                table.insert(puzzle.paths[ci],{row=node.row,col=node.col})
-                puzzle:updateGui(); task.wait(genState.nodeDelay)
-            end
-            task.wait(genState.lineDelay); puzzle:checkForWin()
-        end
-    end)
-end
-
-pcall(function()
-    local mf  = svc.RS:FindFirstChild("Modules")
-    local mnf = mf and mf:FindFirstChild("Minigames")
-    local fgf = mnf and mnf:FindFirstChild("FlowGameManager")
-    local fgm = fgf and fgf:FindFirstChild("FlowGame")
-    if not fgm then return end
-    local ok,FG = pcall(require, fgm)
-    if ok and FG and FG.new then
-        local origNew=FG.new
-        FG.new=function(...)
-            local inst=origNew(...)
-            if genState.enabled then task.spawn(function() task.wait(0.25); solveFlow(inst) end) end
-            return inst
-        end
-    end
-end)
-
-UIFramework.Toggle.new({ Text = "Auto Solve Generator", Icon = "bolt", Value = false, Parent = tabGen, OnChange = function(v) genState.enabled=v end })
-UIFramework.Slider.new({ Text = "Wire Delay", Icon = "sliders", Min = 0.1, Max = 1, Step = 0.1, Value = genState.nodeDelay, Parent = tabGen, OnChange = function(v) genState.nodeDelay=v end })
-UIFramework.Slider.new({ Text = "Finish Delay", Icon = "sliders", Min = 0.1, Max = 1, Step = 0.1, Value = genState.lineDelay, Parent = tabGen, OnChange = function(v) genState.lineDelay=v end })
-
--- ============================================================
--- 3. INFINITE STAMINA
--- ============================================================
-local tabGlobal = Panel:AddTab({ Name = "Global", Icon = "globe" })
-addSection(tabGlobal, "Stamina")
-local infStam = false
-
-local function applyStamina()
-    pcall(function()
-        local sm = svc.RS:FindFirstChild("Systems") and svc.RS.Systems:FindFirstChild("Character") and svc.RS.Systems.Character:FindFirstChild("Game") and svc.RS.Systems.Character.Game:FindFirstChild("Sprinting")
-        if sm then local m=require(sm); if m then m.StaminaLossDisabled=infStam end end
-    end)
-end
-
-task.spawn(function() while true do task.wait(0.8); if infStam then applyStamina() end end end)
-UIFramework.Toggle.new({ Text = "Infinite Stamina", Icon = "bolt", Value = false, Parent = tabGlobal, OnChange = function(v) infStam=v; applyStamina() end })
-
--- ============================================================
--- 4. SURVIVOR AIMBOT
--- ============================================================
-local tabAimbot = Panel:AddTab({ Name = "Aimbot", Icon = "crosshair" })
-addSection(tabAimbot, "Survivor Aimbot")
-
-local aim = { enabled = false, maxDist = 100, locked = false, target = nil, conn = nil }
-
-local function getNearestTarget()
-    local char = lp.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-    local kf = getTeamFolder("Killers")
-    local sf = getTeamFolder("Survivors")
-    local folders = {}
-    if kf and char:IsDescendantOf(kf) then table.insert(folders, sf) else table.insert(folders, kf) end
-
-    local best, bestDist = nil, math.huge
-    for _, folder in ipairs(folders) do
-        if folder then
-            for _, model in ipairs(folder:GetChildren()) do
-                if model ~= char and model:IsA("Model") then
-                    local r = model:FindFirstChild("HumanoidRootPart")
-                    local h = model:FindFirstChildOfClass("Humanoid")
-                    if r and h and h.Health > 0 then
-                        local d = (r.Position - hrp.Position).Magnitude
-                        if d < bestDist and d <= aim.maxDist then bestDist=d; best=r end
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function aimUnlock()
-    if aim.conn then aim.conn:Disconnect(); aim.conn=nil end
-    aim.locked=false; aim.target=nil
-end
-
-local function aimLock(targetHRP)
-    aimUnlock()
-    if not targetHRP or not targetHRP.Parent then return end
-    aim.target=targetHRP; aim.locked=true
-    aim.conn = svc.Run.RenderStepped:Connect(function()
-        if not aim.enabled or not aim.target or not aim.target.Parent then
-            task.defer(aimUnlock); return
-        end
-        local cam  = svc.WS.CurrentCamera
-        local char = lp.Character
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        if cam and hrp then
-            local tp = aim.target.Position
-            cam.CFrame = CFrame.new(cam.CFrame.Position, tp)
-            hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(tp.X, hrp.Position.Y, tp.Z))
-        end
-    end)
-end
-
-local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-    local method = getnamecallmethod()
-    local args   = {...}
-
-    if aim.enabled and not (elliotAim and elliotAim.enabled) and method == "FireServer" and args[1] == "UseActorAbility" then
-        if not (tt and tt.enabled and activeBackstabConn ~= nil) then
-            task.spawn(function()
-                local target = getNearestTarget()
-                if target then aimLock(target) end
-            end)
-        end
-    end
-    return oldNamecall(self, ...)
-end)
-
-UIFramework.Toggle.new({ Text = "Enable Aimbot", Icon = "crosshair", Value = false, Parent = tabAimbot, OnChange = function(v) aim.enabled=v; if not v then aimUnlock() end end })
-UIFramework.Slider.new({ Text = "Max Distance", Icon = "sliders", Min = 20, Max = 200, Step = 1, Value = aim.maxDist, Parent = tabAimbot, OnChange = function(v) aim.maxDist=v end })
-UIFramework.Button.new({ Text = "Unlock Target", Icon = "unlock", Variant = "primary", Parent = tabAimbot, OnClick = function() aimUnlock() end })
-
--- ============================================================
--- 4a. ELLIOT PREDICTIVE AIMBOT
--- ============================================================
-addSection(tabAimbot, "Elliot Predictive Aimbot")
-
-elliotAim = {
-    enabled = false, maxDist = 140, projectileSpeed = 85, leadStrength = 1.00,
-    pingScale = 0.55, accelWeight = 0.60, areaWeight = 0.35, minLead = 0.02,
-    maxLead = 0.42, smoothSpeed = 20, aimHeight = 1.15, target = nil,
-    targetModel = nil, conn = nil, samples = {}, lastTargetPos = nil,
-    lastSampleTime = 0, lastAimPos = nil,
-}
-
-local function isElliotCharacter(model)
-    if not model or not model:IsA("Model") then return false end
-    local n = tostring(model.Name):lower():gsub("[%s_%-]", "")
-    if n:find("elliot", 1, true) then return true end
-    local ok, attrs = pcall(function() return model:GetAttributes() end)
-    if ok and attrs then
-        for key, value in pairs(attrs) do
-            local k = tostring(key):lower()
-            local v = tostring(value):lower():gsub("[%s_%-]", "")
-            if (k:find("character",1,true) or k:find("kit",1,true) or k:find("actor",1,true)) and v:find("elliot",1,true) then return true end
-        end
-    end
-    return false
-end
-
-local function getHorizontalVelocity(part)
-    if not part then return Vector3.zero end
-    local v = part.AssemblyLinearVelocity
-    if not v or v.Magnitude < 0.001 then v = part.Velocity end
-    return Vector3.new(v.X, 0, v.Z)
-end
-
-local function getElliotTarget()
-    local char = lp.Character
-    local myHRP = char and char:FindFirstChild("HumanoidRootPart")
-    if not char or not myHRP then return nil, nil end
-    local kf = getTeamFolder("Killers")
-    if not kf then return nil, nil end
-    local bestModel, bestHRP, bestScore = nil, nil, math.huge
-    for _, model in ipairs(kf:GetChildren()) do
-        if model:IsA("Model") and model ~= char then
-            local hrp = model:FindFirstChild("HumanoidRootPart")
-            local hum = model:FindFirstChildOfClass("Humanoid")
-            if hrp and hum and hum.Health > 0 then
-                local d = (hrp.Position - myHRP.Position).Magnitude
-                if d <= elliotAim.maxDist then
-                    local score = d
-                    if score < bestScore then bestScore, bestModel, bestHRP = score, model, hrp end
-                end
-            end
-        end
-    end
-    return bestModel, bestHRP
-end
-
-local function elliotAimStop()
-    if elliotAim.conn then pcall(function() elliotAim.conn:Disconnect() end); elliotAim.conn = nil end
-    elliotAim.target = nil; elliotAim.targetModel = nil; elliotAim.samples = {}; elliotAim.lastAimPos = nil
-end
-
-local function elliotAimStart()
-    elliotAimStop()
-    elliotAim.conn = svc.Run.RenderStepped:Connect(function(dt)
-        if not elliotAim.enabled then task.defer(elliotAimStop); return end
-        local char = lp.Character
-        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
-        if not char or not myHRP or not isElliotCharacter(char) then return end
-
-        local currentTarget, currentHRP = elliotAim.targetModel, elliotAim.target
-        local invalid = true
-        if currentTarget and currentHRP and currentTarget.Parent and currentHRP.Parent then
-            local hum = currentTarget:FindFirstChildOfClass("Humanoid")
-            local d = (currentHRP.Position - myHRP.Position).Magnitude
-            invalid = (not hum or hum.Health <= 0 or d > elliotAim.maxDist)
-        end
-        if invalid then
-            currentTarget, currentHRP = getElliotTarget()
-            if currentTarget and currentHRP then
-                elliotAim.targetModel = currentTarget; elliotAim.target = currentHRP
-                elliotAim.samples = {}; elliotAim.lastTargetPos = currentHRP.Position
-            else return end
-        end
-
-        local cam = svc.WS.CurrentCamera
-        if not cam then return end
-
-        local predicted = currentHRP.Position + Vector3.new(0, elliotAim.aimHeight, 0)
-        local smooth = math.clamp(elliotAim.smoothSpeed, 1, 60)
-        if elliotAim.lastAimPos then
-            local alpha = 1 - math.exp(-smooth * (dt or 1/60))
-            predicted = elliotAim.lastAimPos:Lerp(predicted, alpha)
-        end
-        elliotAim.lastAimPos = predicted
-        cam.CFrame = CFrame.new(cam.CFrame.Position, predicted)
-    end)
-end
-
-UIFramework.Toggle.new({ Text = "Enable Elliot Predictive Aimbot", Icon = "crosshair", Value = false, Parent = tabAimbot, OnChange = function(v) elliotAim.enabled = v; if v then elliotAimStart() else elliotAimStop() end end })
-UIFramework.Slider.new({ Text = "Max Target Distance", Icon = "sliders", Min = 30, Max = 200, Step = 1, Value = elliotAim.maxDist, Parent = tabAimbot, OnChange = function(v) elliotAim.maxDist=v end })
-UIFramework.Button.new({ Text = "Force Re-acquire", Icon = "refresh", Variant = "secondary", Parent = tabAimbot, OnClick = function() elliotAim.target = nil; elliotAim.targetModel = nil; elliotAim.samples = {}; elliotAim.lastAimPos = nil end })
-
--- ============================================================
--- 4b. SMART KILLER AIMBOT
--- ============================================================
-addSection(tabAimbot, "Smart Killer Aimbot")
-
-local killerAim = {
-    enabled = false, maxDist = 15, lockedModel = nil, lockedHRP = nil,
-    camActive = false, conn = nil, injuredFirst = true, downedPrio = true,
-    camTookOver = false, smoothSpeed = 14,
-}
-
-local function getKillerAimLegPos(model)
-    local priority = {"RightFoot","LeftFoot","RightLowerLeg","LeftLowerLeg","LowerTorso"}
-    for _, name in ipairs(priority) do
-        local part = model:FindFirstChild(name)
-        if part and part:IsA("BasePart") then return part.Position end
-    end
-    local hrp = model:FindFirstChild("HumanoidRootPart")
-    return hrp and (hrp.Position - Vector3.new(0, 2.2, 0)) or nil
-end
-
-local function killerAimHasLOS(killerHRP, targetHRP, killerChar, targetChar)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {killerChar, targetChar}
-    local origin = killerHRP.Position + Vector3.new(0, 1.5, 0)
-    local dir    = targetHRP.Position - origin
-    return svc.WS:Raycast(origin, dir, params) == nil
-end
-
-local function killerAimStop()
-    if killerAim.conn then pcall(function() killerAim.conn:Disconnect() end); killerAim.conn=nil end
-    killerAim.lockedModel = nil; killerAim.lockedHRP = nil; killerAim.camActive = false
-    if killerAim.camTookOver then
-        pcall(function() svc.WS.CurrentCamera.CameraType = Enum.CameraType.Custom end)
-        killerAim.camTookOver = false
-    end
-end
-
-local function killerAimRun()
-    killerAimStop()
-    killerAim.conn = svc.Run.RenderStepped:Connect(function(dt)
-        if not killerAim.enabled then task.defer(killerAimStop); return end
-        local char = lp.Character
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        if not char or not hrp then return end
-        local cam = svc.WS.CurrentCamera
-
-        if killerAim.lockedModel then
-            local model = killerAim.lockedModel
-            local tHRP  = killerAim.lockedHRP
-            local tHum  = model:FindFirstChildOfClass("Humanoid")
-
-            if not model.Parent or not tHRP or not tHRP.Parent or (tHum and tHum.Health <= 0) then
-                killerAim.lockedModel = nil; killerAim.lockedHRP = nil; killerAim.camActive = false
-                if killerAim.camTookOver then pcall(function() cam.CameraType = Enum.CameraType.Custom end); killerAim.camTookOver = false end
-                return
-            end
-
-            local dist = (tHRP.Position - hrp.Position).Magnitude
-            local hasLOS = killerAimHasLOS(hrp, tHRP, char, model)
-            local exitDist = killerAim.maxDist + 4
-            local rangeOk = killerAim.camActive and (dist <= exitDist) or (dist <= killerAim.maxDist)
-
-            if rangeOk and hasLOS then
-                local legPos = getKillerAimLegPos(model)
-                if cam and legPos then
-                    if not killerAim.camTookOver then cam.CameraType = Enum.CameraType.Scriptable; killerAim.camTookOver = true end
-                    local lookFlat = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
-                    lookFlat = (lookFlat.Magnitude > 0.01) and lookFlat.Unit or Vector3.new(0,0,-1)
-                    local camPos = hrp.Position - lookFlat*8 + Vector3.new(0,3,0)
-                    local targetCF = CFrame.new(camPos, legPos)
-                    local curRotOnly = cam.CFrame - cam.CFrame.Position
-                    local tgtRotOnly = targetCF - targetCF.Position
-                    local alpha = 1 - math.exp(-killerAim.smoothSpeed * (dt or 1/60))
-                    cam.CFrame = (curRotOnly:Lerp(tgtRotOnly, alpha)) + camPos
-                end
-                killerAim.camActive = true
-            else
-                if killerAim.camTookOver then pcall(function() cam.CameraType = Enum.CameraType.Custom end); killerAim.camTookOver = false end
-                killerAim.camActive = false
-            end
-        else
-            local sf = getTeamFolder("Survivors")
-            if not sf then return end
-            local candidates = {}
-            for _, model in ipairs(sf:GetChildren()) do
-                if model ~= char and model:IsA("Model") then
-                    local r = model:FindFirstChild("HumanoidRootPart")
-                    local h = model:FindFirstChildOfClass("Humanoid")
-                    if r and h and h.Health > 0 then
-                        local d = (r.Position - hrp.Position).Magnitude
-                        if d <= 40 then table.insert(candidates, {model=model, hrp=r, health=h.Health, maxHP=math.max(h.MaxHealth,1), dist=d}) end
-                    end
-                end
-            end
-            if #candidates == 0 then return end
-            if killerAim.injuredFirst then
-                table.sort(candidates, function(a, b)
-                    local aDn = killerAim.downedPrio and (a.health/a.maxHP) < 0.30
-                    local bDn = killerAim.downedPrio and (b.health/b.maxHP) < 0.30
-                    if aDn ~= bDn then return aDn end
-                    if math.abs(a.health - b.health) > 5 then return a.health < b.health end
-                    return a.dist < b.dist
-                end)
-            end
-            local pick = candidates[1]
-            killerAim.lockedModel = pick.model; killerAim.lockedHRP = pick.hrp
-        end
-    end)
-end
-
-UIFramework.Toggle.new({ Text = "Enable Smart Killer Aimbot", Icon = "crosshair", Value = false, Parent = tabAimbot, OnChange = function(v) killerAim.enabled = v; if v then killerAimRun() else killerAimStop() end end })
-UIFramework.Toggle.new({ Text = "Injured First", Icon = "heart", Value = true, Parent = tabAimbot, OnChange = function(v) killerAim.injuredFirst = v end })
-UIFramework.Toggle.new({ Text = "Downed Priority (<30% HP)", Icon = "skull", Value = true, Parent = tabAimbot, OnChange = function(v) killerAim.downedPrio = v end })
-UIFramework.Slider.new({ Text = "Unlock Distance", Icon = "sliders", Min = 5, Max = 40, Step = 1, Value = killerAim.maxDist, Parent = tabAimbot, OnChange = function(v) killerAim.maxDist = v end })
-UIFramework.Slider.new({ Text = "Cam Smoothness", Icon = "sliders", Min = 4, Max = 30, Step = 1, Value = killerAim.smoothSpeed, Parent = tabAimbot, OnChange = function(v) killerAim.smoothSpeed = v end })
-UIFramework.Button.new({ Text = "Force Re-acquire Target", Icon = "refresh", Variant = "secondary", Parent = tabAimbot, OnClick = function() killerAim.lockedModel = nil; killerAim.lockedHRP = nil; killerAim.camActive = false end })
-
--- ============================================================
--- 4c. ANTI TWO-TIME BACKSTAB (Killer)
--- ============================================================
-addSection(tabAimbot, "Anti-Backstab (Killer)")
-
-local antiBS = { enabled=false, dangerRange=12, coneAngle=75, lungeSpeed=24, requireKit=false, conn=nil, threatModel=nil, lastSeenTime=0 }
-
-local function isLikelyTwoTime(model)
-    local ok, attrs = pcall(function() return model:GetAttributes() end)
-    if ok and attrs then
-        for k, v in pairs(attrs) do
-            local lk = tostring(k):lower()
-            if (lk:find("character") or lk:find("kit")) and type(v)=="string" and v:lower():gsub("%s","")=="twotime" then return true end
-        end
-    end
-    return false
-end
-
-local TWO_TIME_DAGGER_ANIM_ID = "rbxassetid://100725497418533"
-
-local function isPlayingDaggerAnim(model)
-    local hum = model:FindFirstChildOfClass("Humanoid")
-    if not hum then return false end
-    local ok, tracks = pcall(function() return hum:GetPlayingAnimationTracks() end)
-    if not ok or not tracks then return false end
-    for _, track in ipairs(tracks) do
-        local anim = track.Animation
-        if anim and anim.AnimationId == TWO_TIME_DAGGER_ANIM_ID then return true end
-    end
-    return false
-end
-
-local function findBackstabThreat(hrp)
-    local sf = getTeamFolder("Survivors")
-    if not sf then return nil end
-    local char = lp.Character
-    local best, bestScore = nil, -1
-    for _, model in ipairs(sf:GetChildren()) do
-        if model:IsA("Model") and model ~= char then
-            local r = model:FindFirstChild("HumanoidRootPart")
-            local h = model:FindFirstChildOfClass("Humanoid")
-            if r and h and h.Health > 0 and (not antiBS.requireKit or isLikelyTwoTime(model)) then
-                local toSurv = r.Position - hrp.Position
-                local dist   = toSurv.Magnitude
-                if dist > 0.1 then
-                    local dot = toSurv.Unit:Dot(-hrp.CFrame.LookVector)
-                    local inCone = dot >= math.cos(math.rad(antiBS.coneAngle))
-                    local vel = r.AssemblyLinearVelocity or Vector3.zero
-                    local approachSpeed = 0
-                    if vel.Magnitude > 0.5 then approachSpeed = vel.Unit:Dot((hrp.Position-r.Position).Unit) * vel.Magnitude end
-                    local lunging = approachSpeed > antiBS.lungeSpeed
-                    local abilityFiring = dist <= 20 and isPlayingDaggerAnim(model)
-                    local rangeOk = dist <= antiBS.dangerRange or (lunging and dist <= antiBS.dangerRange*1.6)
-
-                    if abilityFiring or (inCone and rangeOk) then
-                        local score = (1/math.max(dist,1)) * math.max(dot,0.1) * (lunging and 2 or 1) * (abilityFiring and 4 or 1)
-                        if score > bestScore then bestScore=score; best=r end
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function toggleAntiBackstab(state)
-    antiBS.enabled = state
-    if antiBS.conn then pcall(function() antiBS.conn:Disconnect() end); antiBS.conn=nil end
-    if not state then antiBS.threatModel=nil; return end
-    antiBS.conn = svc.Run.Heartbeat:Connect(function()
-        if not antiBS.enabled then return end
-        pcall(function()
-            local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
-            local hum =char and char:FindFirstChildOfClass("Humanoid")
-            if not hrp or not hum or hum.Health<=0 then return end
-            local threat = findBackstabThreat(hrp)
-            if threat then
-                antiBS.threatModel = threat; antiBS.lastSeenTime = os.clock()
-                local facePos = Vector3.new(threat.Position.X, hrp.Position.Y, threat.Position.Z)
-                hrp.CFrame = CFrame.new(hrp.Position, facePos)
-            elseif antiBS.threatModel and os.clock()-antiBS.lastSeenTime < 0.5 then
-                -- BUG FIX: antiBS.threatModel is already the HRP, no need to search for it again
-                if antiBS.threatModel.Parent then
-                    local hrp2 = antiBS.threatModel
-                    local facePos = Vector3.new(hrp2.Position.X, hrp.Position.Y, hrp2.Position.Z)
-                    hrp.CFrame = CFrame.new(hrp.Position, facePos)
-                end
-            else
-                antiBS.threatModel = nil
-            end
-        end)
-    end)
-end
-
-UIFramework.Toggle.new({ Text = "Enable Anti-Backstab", Icon = "shield", Value = false, Parent = tabAimbot, OnChange = function(v) toggleAntiBackstab(v) end })
-UIFramework.Slider.new({ Text = "Danger Range", Icon = "sliders", Min = 6, Max = 25, Step = 1, Value = antiBS.dangerRange, Parent = tabAimbot, OnChange = function(v) antiBS.dangerRange = v end })
-UIFramework.Slider.new({ Text = "Blind Cone Angle", Icon = "sliders", Min = 30, Max = 120, Step = 1, Value = antiBS.coneAngle, Parent = tabAimbot, OnChange = function(v) antiBS.coneAngle = v end })
-UIFramework.Toggle.new({ Text = "Require Confirmed Two Time", Icon = "lock", Value = false, Parent = tabAimbot, OnChange = function(v) antiBS.requireKit = v end })
-
--- ============================================================
--- 5. TWO TIME BACKSTAB
--- ============================================================
-local tabTwoTime = Panel:AddTab({ Name = "TwoTime", Icon = "sword" })
-addSection(tabTwoTime, "Backstab Settings")
-
-tt = {
-    enabled = false, autoStab = true, doubleStab = false, triggerFlash = false,
-    checkCooldown = true, ignoreStunImmune = true, checkObstacles = true, snappyTp = true,
-    range = 10, behindDist = 3.5, cooldown = 30.0, coneAngle = 70, aimLockTime = 0.3,
-    lockMode = "Cam lock + Humanoid lock", lastTrigger = -30,
-}
-activeBackstabConn = nil
-
-local function resetBackstabLock()
-    if activeBackstabConn then pcall(function() activeBackstabConn:Disconnect() end); activeBackstabConn = nil end
-    pcall(function()
-        local char = lp.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.AutoRotate = true end
-    end)
-    ensureTouchGuiVisible()
-end
-
-local function getDaggerButton()
-    local pg = lp:FindFirstChildOfClass("PlayerGui")
-    local mainUI = pg and pg:FindFirstChild("MainUI")
-    local container = mainUI and mainUI:FindFirstChild("AbilityContainer")
-    return container and container:FindFirstChild("Dagger")
-end
-
-local function getPing()
-    local ok, v = pcall(function() return svc.Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    return (ok and v and v > 0 and v / 1000) or 0.08
-end
-
-local function isDaggerOnCooldown()
-    local btn = getDaggerButton()
-    if btn then
-        local overlay = btn:FindFirstChild("Overlay") or btn:FindFirstChild("CooldownOverlay")
-        if overlay and overlay:IsA("GuiObject") and overlay.Visible then return true end
-    end
-    local char = lp.Character
-    if char then
-        local cd = char:GetAttribute("DaggerCooldown") or char:GetAttribute("StabCooldown")
-        if type(cd) == "number" and cd > 0 then return true end
-        if type(cd) == "boolean" and cd then return true end
-    end
-    return false
-end
-
-local function hasLineOfSight(posA, posB, ignoreChar)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {ignoreChar, lp.Character}
-    return svc.WS:Raycast(posA, posB - posA, params) == nil
-end
-
-local function fireDaggerAbility()
-    local function doOneFire()
-        local re = getRemoteEvent()
-        if re then
-            pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring("\3\5\0\0\0Dagger")}) end)
-            pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring("\3\4\0\0\0Stab")}) end)
-        end
-        local btn = getDaggerButton()
-        if btn then
-            pcall(function() if btn.Activate then btn:Activate() end end)
-            pcall(function() if btn.Activated then btn.Activated:Fire() end end)
-        end
-    end
-    doOneFire()
-    if tt.triggerFlash and doTriggerFlash then task.spawn(doTriggerFlash) end
-    if tt.doubleStab then task.wait(0.18); doOneFire() end
-end
-
-local function computeBehindCFrame(hrp, khrp)
-    local kCF = khrp.CFrame
-    local vel = khrp.AssemblyLinearVelocity or Vector3.zero
-    local lead = math.clamp(getPing() + 0.04, 0.04, 0.2)
-    local pred = kCF.Position
-    if vel.Magnitude > 2 then pred = pred + vel * lead end
-    local behind = pred - kCF.LookVector.Unit * tt.behindDist
-    behind = Vector3.new(behind.X, hrp.Position.Y, behind.Z)
-    return CFrame.new(behind, Vector3.new(pred.X, hrp.Position.Y, pred.Z))
-end
-
-local function isPlayerBehindKiller(hrp, khrp, dist)
-    if dist > tt.range or dist < 0.1 then return false end
-    local dot = (hrp.Position - khrp.Position).Unit:Dot(-khrp.CFrame.LookVector)
-    return dot >= math.cos(math.rad(tt.coneAngle))
-end
-
-local function executeBackstab(killer)
-    resetBackstabLock()
-    local char = lp.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local khrp = killer and killer:FindFirstChild("HumanoidRootPart")
-    if not hrp or not khrp then return end
-
-    if tt.checkObstacles and not hasLineOfSight(hrp.Position, khrp.Position, killer) then return end
-
-    if hum then hum.AutoRotate = false end
-    if tt.autoStab then task.spawn(fireDaggerAbility) end
-
-    local startTime = os.clock()
-    activeBackstabConn = svc.Run.RenderStepped:Connect(function()
-        local elapsed = os.clock() - startTime
-        if elapsed >= tt.aimLockTime or not khrp or not khrp.Parent or not hrp or not hrp.Parent then
-            task.defer(resetBackstabLock); return
-        end
-
-        local cam = svc.WS.CurrentCamera
-        local targetCF = computeBehindCFrame(hrp, khrp)
-        local nextCF = tt.snappyTp and targetCF or hrp.CFrame:Lerp(targetCF, 0.65)
-
-        if tt.lockMode == "Cam lock + Humanoid lock" then
-            hrp.CFrame = nextCF
-            if cam then cam.CFrame = CFrame.new(cam.CFrame.Position, khrp.Position + Vector3.new(0,1.5,0)) end
-        elseif tt.lockMode == "Humanoid lock" then
-            hrp.CFrame = nextCF
-        elseif tt.lockMode == "Cam lock" then
-            hrp.CFrame = CFrame.new(nextCF.Position, hrp.CFrame.LookVector)
-            if cam then cam.CFrame = CFrame.new(cam.CFrame.Position, khrp.Position + Vector3.new(0,1.5,0)) end
-        end
-    end)
-end
-
-svc.Run.Heartbeat:Connect(function()
-    if not tt.enabled then return end
-    if activeBackstabConn then return end
-    if os.clock() - tt.lastTrigger < tt.cooldown then return end
-    if tt.checkCooldown and isDaggerOnCooldown() then return end
-
-    local char = lp.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum or hum.Health <= 0 then return end
-
-    local kf = getTeamFolder("Killers"); if not kf then return end
-    for _, killer in ipairs(kf:GetChildren()) do
-        local khrp = killer:FindFirstChild("HumanoidRootPart")
-        local khum = killer:FindFirstChildOfClass("Humanoid")
-        if khrp and khum and khum.Health > 0 then
-            local dist = (khrp.Position - hrp.Position).Magnitude
-            if isPlayerBehindKiller(hrp, khrp, dist) then
-                tt.lastTrigger = os.clock()
-                executeBackstab(killer)
-                break
-            end
-        end
-    end
-end)
-
-lp.CharacterAdded:Connect(function()
-    resetBackstabLock()
-    tt.lastTrigger = -30
-    aimUnlock()
-    killerAim.lockedModel = nil; killerAim.lockedHRP = nil; killerAim.camActive = false
-    if killerAim.camTookOver then
-        pcall(function() svc.WS.CurrentCamera.CameraType = Enum.CameraType.Custom end)
-        killerAim.camTookOver = false
-    end
-    -- FIX: Now correctly calls the forward-declared setupHitTracker
-    if type(setupHitTracker) == "function" then
-        task.spawn(function()
-            task.wait(0.5)
-            local char = lp.Character
-            if char then setupHitTracker(char) end
-        end)
-    end
-end)
-
-UIFramework.Toggle.new({ Text = "Auto Backstab", Icon = "sword", Value = false, Parent = tabTwoTime, OnChange = function(v) tt.enabled = v; tt.lastTrigger = -30; if not v then resetBackstabLock() end end })
-UIFramework.Toggle.new({ Text = "Auto Stab Dagger On TP", Icon = "bolt", Value = true, Parent = tabTwoTime, OnChange = function(v) tt.autoStab = v end })
-UIFramework.Toggle.new({ Text = "Double Auto Stab (x2)", Icon = "bolt", Value = false, Parent = tabTwoTime, OnChange = function(v) tt.doubleStab = v end })
-UIFramework.Toggle.new({ Text = "Snappy Instant TP", Icon = "bolt", Value = true, Parent = tabTwoTime, OnChange = function(v) tt.snappyTp = v end })
-UIFramework.Toggle.new({ Text = "Wall / Obstacle Protection", Icon = "shield", Value = true, Parent = tabTwoTime, OnChange = function(v) tt.checkObstacles = v end })
-UIFramework.Toggle.new({ Text = "Check Dagger Cooldown", Icon = "clock", Value = true, Parent = tabTwoTime, OnChange = function(v) tt.checkCooldown = v end })
-
-local lockOptions = {
-    { Text = "Cam lock + Humanoid lock", Value = "Cam lock + Humanoid lock" },
-    { Text = "Cam lock", Value = "Cam lock" },
-    { Text = "Humanoid lock", Value = "Humanoid lock" }
-}
-UIFramework.Dropdown.new({
-    Label = "Lock Mode", Text = "Select Mode", Value = tt.lockMode, Options = lockOptions, Parent = tabTwoTime,
-    OnChange = function(v) tt.lockMode = v end
-})
-
-UIFramework.Slider.new({ Text = "Trigger Range", Icon = "sliders", Min = 3, Max = 25, Step = 1, Value = tt.range, Parent = tabTwoTime, OnChange = function(v) tt.range=v end })
-UIFramework.Slider.new({ Text = "Behind Cone Angle", Icon = "sliders", Min = 20, Max = 180, Step = 1, Value = tt.coneAngle, Parent = tabTwoTime, OnChange = function(v) tt.coneAngle=v end })
-UIFramework.Slider.new({ Text = "Sticky TP Duration", Icon = "sliders", Min = 0.1, Max = 0.6, Step = 0.01, Value = tt.aimLockTime, Parent = tabTwoTime, OnChange = function(v) tt.aimLockTime=v end })
-
--- ============================================================
--- 6. TWOTIME HUD & FEEDBACK
--- ============================================================
-local _triggerFlashFrame = nil
-local _triggerFlashGui = nil
-
-doTriggerFlash = function()
-    pcall(function()
-        local pg = lp:FindFirstChildOfClass("PlayerGui")
-        if not pg then return end
-        if not _triggerFlashGui or not _triggerFlashGui.Parent then
-            local sg = Instance.new("ScreenGui")
-            sg.Name="BH_TriggerFlash"; sg.ResetOnSpawn=false; sg.IgnoreGuiInset=true; sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.Parent=pg
-            local frame = Instance.new("Frame")
-            frame.Size=UDim2.new(1,0,1,0); frame.BorderSizePixel=0
-            frame.BackgroundColor3=Color3.fromRGB(255,210,40); frame.BackgroundTransparency=1; frame.Parent=sg
-            _triggerFlashGui=sg; _triggerFlashFrame=frame
-        end
-        local ts = game:GetService("TweenService")
-        _triggerFlashFrame.BackgroundTransparency = 0.55
-        ts:Create(_triggerFlashFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency=1}):Play()
-    end)
-end
-
-addSection(tabTwoTime, "HUD & Feedback")
-UIFramework.Toggle.new({ Text = "Trigger Flash on Fire", Icon = "bolt", Value = false, Parent = tabTwoTime, OnChange = function(v) tt.triggerFlash=v end })
-
--- ============================================================
--- 7. HELPER TAB (Noob auto-play system)
--- ============================================================
-local tabHelper = Panel:AddTab({ Name = "Helper", Icon = "zap" })
-local PathSvc = game:GetService("PathfindingService")
-
-staminaEstimate = { value = 100, lastTime = os.clock(), exhaustStart = nil, lastSprint = false }
-
-local function readStamina()
-    local char = lp.Character
-    if not char then return staminaEstimate.value end
-    local v = char:GetAttribute("Stamina") or char:GetAttribute("Stam")
-    if type(v)=="number" then return v end
-    local sv = char:FindFirstChild("Stamina") or char:FindFirstChild("Stam")
-    if sv and sv:IsA("NumberValue") then return sv.Value end
-    return staminaEstimate.value
-end
-
-local function setSprint(shouldSprint)
-    pcall(function()
-        if svc.Input.TouchEnabled then
-            local pg = lp:FindFirstChildOfClass("PlayerGui")
-            local tg = pg and pg:FindFirstChild("TouchGui")
-            if tg then
-                local btn = tg:FindFirstChild("SprintButton", true)
-                if btn then btn:Activate() end
-            end
+    -- Asynchronous Network Request
+    task.spawn(function()
+        if not requestFunc then
+            setState(State.ERROR, "📡 Executor does not support HTTP requests.")
             return
         end
-        svc.VIM:SendKeyEvent(shouldSprint, Enum.KeyCode.LeftShift, false, game)
-    end)
-end
 
-local function managedSprint(stam, killerDist, force)
-    if stam <= 2 then setSprint(false); return end
-    if force ~= nil then setSprint(force); return end
-    if stam < 20 then setSprint(false) else setSprint(true) end
-end
+        -- Construct JSON payload with key AND roblox_user_id
+        local payload = HttpService:JSONEncode({
+            key = trimmedKey,
+            roblox_user_id = tostring(LocalPlayer.UserId)
+        })
 
-local function sendHelperChat(msg)
-    pcall(function()
-        local tcs = game:GetService("TextChatService")
-        local ch = tcs.TextChannels:FindFirstChild("RBXGeneral")
-        if ch then ch:SendAsync(msg) end
-    end)
-end
+        local success, response = pcall(function()
+            return requestFunc({
+                Url = VERIFY_ENDPOINT,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = payload
+            })
+        end)
 
-local function fireNoobAbility(names, btnKeywords)
-    local re = getRemoteEvent()
-    if re then
-        for _,n in ipairs(names) do pcall(function() re:FireServer("UseActorAbility",{[1]=buffer.fromstring(n)}) end) end
-    end
-    local pg=lp:FindFirstChildOfClass("PlayerGui")
-    local mainUI=pg and pg:FindFirstChild("MainUI")
-    local container=mainUI and mainUI:FindFirstChild("AbilityContainer")
-    if container then
-        for _,btn in ipairs(container:GetChildren()) do
-            local ln=btn.Name:lower()
-            for _,kw in ipairs(btnKeywords) do
-                if ln:find(kw) then
-                    pcall(function() if btn.Activate then btn:Activate() end end)
-                    break
+        -- Network failure handling
+        if not success or not response then
+            setState(State.ERROR, "📡 Unable to contact the verification server.")
+            return
+        end
+
+        local statusCode = response.StatusCode or response.Status
+        local responseBody = response.Body
+
+        if not responseBody or responseBody == "" then
+            setState(State.ERROR, "⚠️ Invalid response from verification server.")
+            return
+        end
+
+        -- Safe JSON parsing
+        local parseSuccess, decoded = pcall(function()
+            return HttpService:JSONDecode(responseBody)
+        end)
+
+        if not parseSuccess or type(decoded) ~= "table" then
+            setState(State.ERROR, "⚠️ Invalid response from verification server.")
+            return
+        end
+
+        ------------------------------------------------------------------------
+        -- RESPONSE DISPATCHING & SCRIPT LOADER
+        ------------------------------------------------------------------------
+        if decoded.ok == true and decoded.verified == true then
+            saveSavedKey(trimmedKey)
+
+            local verifiedUser = decoded.roblox_username or LocalPlayer.Name
+            local msg = "✅ Verification Successful\nAccount: " .. tostring(verifiedUser) .. "\nYou are verified."
+            setState(State.SUCCESS, msg)
+
+            task.wait(1.5)
+
+            local fade = tweenObject(mainFrame, {
+                Size = UDim2.new(0, 0, 0, 0),
+                BackgroundTransparency = 1
+            }, 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+            fade.Completed:Wait()
+            screenGui:Destroy()
+
+            task.spawn(function()
+                local execSuccess, execErr = pcall(function()
+                    loadstring(game:HttpGet(SCRIPT_URL))()
+                end)
+
+                if not execSuccess then
+                    warn("[Verification System] Error loading main script: " .. tostring(execErr))
                 end
+            end)
+
+        else
+            local errCode = tostring(decoded.error or "")
+            local errMsg = tostring(decoded.message or "")
+            local combined = string.lower(errCode .. " " .. errMsg)
+
+            -- ALREADY VERIFIED = ALLOW ACCESS
+            if string.find(combined, "already_verified")
+                or string.find(combined, "already verified") then
+
+                saveSavedKey(trimmedKey)
+
+                setState(
+                    State.SUCCESS,
+                    "✅ Account already verified\nAccount: " .. LocalPlayer.Name .. "\nLoading script..."
+                )
+
+                task.wait(1.5)
+
+                local fade = tweenObject(mainFrame, {
+                    Size = UDim2.new(0, 0, 0, 0),
+                    BackgroundTransparency = 1
+                }, 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+                fade.Completed:Wait()
+                screenGui:Destroy()
+
+                task.spawn(function()
+                    local execSuccess, execErr = pcall(function()
+                        loadstring(game:HttpGet(SCRIPT_URL))()
+                    end)
+
+                    if not execSuccess then
+                        warn("[Verification System] Error loading main script: " .. tostring(execErr))
+                    end
+                end)
+
+            elseif statusCode == 500 or string.find(combined, "server") then
+                removeSavedKey()
+                setState(State.ERROR, "⚠️ Verification server is unavailable. Please try again.")
+
+            elseif string.find(combined, "key_owner_mismatch")
+                or string.find(combined, "mismatch")
+                or string.find(combined, "different roblox account") then
+                removeSavedKey()
+                setState(State.ERROR, "⚠️ This key belongs to a different Roblox account.")
+
+            elseif string.find(combined, "expired") then
+                removeSavedKey()
+                setState(State.ERROR, "⏳ This verification key has expired.")
+
+            elseif string.find(combined, "used") then
+                removeSavedKey()
+                setState(State.ERROR, "⚠️ This verification key has already been used.")
+
+            elseif string.find(combined, "invalid_key")
+                or string.find(combined, "invalid")
+                or string.find(combined, "not found") then
+                removeSavedKey()
+                setState(State.ERROR, "❌ Invalid verification key.")
+
+            elseif errMsg ~= "" then
+                removeSavedKey()
+                setState(State.ERROR, "⚠️ " .. errMsg)
+
+            else
+                removeSavedKey()
+                setState(State.ERROR, "❌ Verification failed.")
             end
         end
-    end
-end
-
-local function fireGhostburger() fireNoobAbility({"\3\5\0\0\0Ghost","\3\6\0\0\0Ghostburger"},{"ghost","invis","burger"}) end
-local function fireBloxyCola() fireNoobAbility({"\3\4\0\0\0Cola","\3\5\0\0\0BloxyCola"},{"cola","bloxy","speed"}) end
-local function fireSlateskin() fireNoobAbility({"\3\6\0\0\0Slate","\3\7\0\0\0Slateskin"},{"slate","potion","tank","stone"}) end
-
--- FIX: Assigning to the forward-declared upvalue
-setupHitTracker = function(char)
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hum or not helper then return end
-    helper.lastKnownHP = hum.Health
-    hum.HealthChanged:Connect(function(newHP)
-        if not helper then return end
-        if newHP < (helper.lastKnownHP or newHP) - 5 then
-            helper.hitsTaken = math.min((helper.hitsTaken or 0)+1, 5)
-            helper.lastHitTime = os.clock()
-        end
-        helper.lastKnownHP = newHP
     end)
 end
 
-helper = {
-    autoStam=false, showLoops=false, autoLoop=false, autoPlay=false, stamConn=nil, loopEspConn=nil,
-    loopConn=nil, playConn=nil, loopMarks={}, minLoopSize=14, playState="IDLE",
-    lastGhost=-45, lastCola=-12, lastSlate=-55, lastChat=-30, _loopFrame=0, _loopTick=0, _playTick=0,
-    killerStamEst={value=110, lastPos=nil, lastTime=os.clock(), isSprinting=false},
-    hitsTaken=0, maxHitsRegen=2, lastHitTime=0, lastKnownHP=100, isNavigating=false, abortNav=false,
-    currentGenTarget=nil, killerPrevPos=nil, killerPrevTime=os.clock(), killerApprVel=0,
-    approachHistory={}, distHistory={}, playStartTime=nil, stateSince=0, stateHold=0.35,
-    targetingLatched=false, playBusy=false, lastGenScan=-30, orbitAngle=0, orbitTime=os.clock(), lastOrbitModel=nil
-}
+-- Input Event Connections
+checkButton.MouseButton1Click:Connect(function()
+    verifyKeyProcess(false)
+end)
 
-local function toggleAutoStam(state)
-    helper.autoStam = state
-    if helper.stamConn then pcall(function() helper.stamConn:Disconnect() end); helper.stamConn=nil end
-    if not state then setSprint(false); return end
-    local nextRun = 0
-    helper.stamConn = svc.Run.Heartbeat:Connect(function()
-        if not helper.autoStam then return end
-        local now = os.clock()
-        if now < nextRun then return end
-        nextRun = now + 0.15
-        pcall(function()
-            local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
-            local hum=char and char:FindFirstChildOfClass("Humanoid")
-            if not hrp or not hum or hum.Health<=0 then return end
-            local kf=getTeamFolder("Killers")
-            local kDist=math.huge
-            if kf then for _,killer in ipairs(kf:GetChildren()) do
-                local r=killer:FindFirstChild("HumanoidRootPart"); if r then
-                    local d=(r.Position-hrp.Position).Magnitude
-                    if d<kDist then kDist=d end
-                end
-            end end
-            local stam=readStamina()
-            if kDist < 20 then managedSprint(stam, kDist, stam > 20)
-            elseif kDist < 40 then managedSprint(stam, kDist)
-            elseif kDist < 65 then
-                if stam>60 then managedSprint(stam,kDist,true)
-                elseif stam<40 then managedSprint(stam,kDist,false)
-                else managedSprint(stam,kDist) end
-            else setSprint(false) end
-        end)
-    end)
-end
-
-local function toggleAutoPlay(state)
-    helper.autoPlay = state
-    if helper.playConn then pcall(function() helper.playConn:Disconnect() end); helper.playConn=nil end
-    if not state then setSprint(false); helper.isNavigating=false; helper.abortNav=false; return end
-    helper.lastGhost = os.clock()-45; helper.lastCola = os.clock()-12; helper.lastSlate = os.clock()-55
-    helper.hitsTaken = 0; helper.playStartTime = os.clock()
-    task.spawn(function() local char = lp.Character; if char then setupHitTracker(char) end end)
-
-    helper.playConn = svc.Run.Heartbeat:Connect(function()
-        if not helper.autoPlay then return end
-        helper._playTick = helper._playTick+1
-        if helper._playTick % 12 ~= 0 then return end
-        task.spawn(function()
-            pcall(function()
-                local char=lp.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
-                local hum=char and char:FindFirstChildOfClass("Humanoid")
-                if not char or not hrp or not hum or hum.Health<=0 then return end
-                local now = os.clock()
-                local kf=getTeamFolder("Killers"); local kDist=math.huge; local khrp=nil
-                if kf then for _,k in ipairs(kf:GetChildren()) do
-                    local r=k:FindFirstChild("HumanoidRootPart"); if r then
-                        local d=(r.Position-hrp.Position).Magnitude
-                        if d<kDist then kDist=d; khrp=r end
-                    end
-                end end
-                local stam = readStamina()
-                local myHP = hum.Health
-                local inGrace = helper.playStartTime and (now - helper.playStartTime) < 6
-
-                if not inGrace and myHP < 40 and now-helper.lastChat >= 30 then
-                    helper.lastChat=now; task.spawn(function() sendHelperChat("need help! low hp") end)
-                end
-
-                if kDist < 40 then managedSprint(stam, kDist, stam > 20)
-                elseif kDist < 65 then managedSprint(stam, kDist)
-                else setSprint(false) end
-            end)
-        end)
-    end)
-end
-
-addSection(tabHelper, "Stamina")
-UIFramework.Toggle.new({ Text = "Auto Stamina Management", Icon = "bolt", Value = false, Parent = tabHelper, OnChange = function(v) toggleAutoStam(v) end })
-
-addSection(tabHelper, "Noob Auto Play")
-UIFramework.Toggle.new({
-    Text = "Auto Play (Full Noob AI)", Icon = "robot", Value = false, Parent = tabHelper,
-    OnChange = function(v) toggleAutoPlay(v); if v then toggleAutoStam(true) end end
-})
-
--- Wrap buttons in a group for clean horizontal layout
-local helperBtnGroup = UIFramework.CreateButtonGroup({ Parent = tabHelper })
-UIFramework.Button.new({ Text = "Ghostburger", Icon = "ghost", Variant = "secondary", Parent = helperBtnGroup, OnClick = function() task.spawn(fireGhostburger) end })
-UIFramework.Button.new({ Text = "Bloxy Cola", Icon = "bottle-water", Variant = "secondary", Parent = helperBtnGroup, OnClick = function() task.spawn(fireBloxyCola) end })
-UIFramework.Button.new({ Text = "Slateskin", Icon = "shield", Variant = "secondary", Parent = helperBtnGroup, OnClick = function() task.spawn(fireSlateskin) end })
-UIFramework.Button.new({ Text = "Request Help", Icon = "bell", Variant = "warning", Parent = helperBtnGroup, OnClick = function() task.spawn(function() sendHelperChat("need help!") end) end })
-
--- ============================================================
--- 8. APPEARANCE TAB
--- ============================================================
-local tabAppearance = Panel:AddTab({ Name = "Appearance", Icon = "palette" })
-addSection(tabAppearance, "Theme Settings")
-
-local themeOptions = {}
-for _, themeName in ipairs(UIFramework.GetAvailableThemes()) do
-    table.insert(themeOptions, { Text = themeName, Value = themeName, Icon = "palette" })
-end
-
-UIFramework.Dropdown.new({
-    Label = "Theme", Text = "Select Theme", Value = UIFramework.GetCurrentTheme(), Options = themeOptions, Parent = tabAppearance,
-    OnChange = function(value)
-        UIFramework.SetTheme(value)
-        UIFramework.Notify({ Type = "success", Title = "Theme Changed!", Message = "Theme set to: " .. value, Duration = 2 })
+keyTextBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        verifyKeyProcess(false)
     end
-})
+end)
 
-UIFramework.Slider.new({
-    Text = "Panel Transparency", Icon = "eye", Value = 0, Min = 0, Max = 0.8, Step = 0.1,
-    Parent = tabAppearance, OnChange = function(value) Panel:SetTransparency(value) end
-})
+-- Initialize UI & Auto-Check Local Key
+setState(State.IDLE, "")
 
--- ============================================================
--- 9. INFO & VERSION TAB
--- ============================================================
-local tabInfo = Panel:AddTab({ Name = "Info", Icon = "info" })
-addSection(tabInfo, "Build & Display")
-
-UIFramework.Toggle.new({ Text = "Version Display HUD", Icon = "info", Value = false, Parent = tabInfo, OnChange = function(v) toggleVersionHud(v) end })
-UIFramework.Button.new({
-    Text = "Show Script Version", Icon = "code", Variant = "primary", Parent = tabInfo,
-    OnClick = function()
-        UIFramework.Notify({
-            Type = "info", Title = "BetrayalHub Custom",
-            Message = "Version: "..SCRIPT_VERSION.."\nUI: RBUI (Futuristic Theme)\nFeatures: ESP, Aimbot, TwoTime, Noob AI",
-            Duration = 8
-        })
-    end
-})
-
-print("BetrayalHub "..SCRIPT_VERSION.." loaded — RBUI UI + Floating Menu Active 🚀")
-
-end) -- end pcall
-
-if not success then flashError(err) end
+local savedKey = getSavedKey()
+if savedKey and savedKey ~= "" then
+    keyTextBox.Text = savedKey
+    verifyKeyProcess(true)
+end
