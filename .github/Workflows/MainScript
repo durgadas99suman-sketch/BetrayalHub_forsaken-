@@ -624,10 +624,30 @@ local success, err = pcall(function()
     -- Anti-bait (position spoof)
     local antiBaitEnabled    = false
     local behindstuds        = 4
-    local tpSpeed            = 55      -- lerp alpha = tpSpeed/60
+    local tpSpeed            = 55      -- smoothing rate constant, frame-rate independent
     local doitmate           = false   -- true when local player is blocking
     local moredirectrn       = false   -- underground spoof (Y=-90000)
     local moredirectend      = false   -- reset to current pos
+    -- Ping compensation: the spoof position is computed locally, but by the
+    -- time the server processes the packet, ~1 RTT has passed and the real
+    -- killer has moved on. We extrapolate the killer forward using their
+    -- tracked velocity (killerState, already maintained by the roster
+    -- tracker) by an amount equal to ping + a safety buffer, so the spoofed
+    -- "behind them" position lines up with where they'll actually be once
+    -- the server sees it — instead of where they were when we computed it.
+    local antiBaitAutoPing      = true
+    local antiBaitManualPingMs  = 80
+    local antiBaitExtraBufferMs = 20
+    local lastAntiBaitTick      = os.clock()
+    local function getLivePingMs()
+        local ok, ms = pcall(function()
+            local stat = svc.Stats:FindFirstChild("PerformanceStats")
+            local pingStat = stat and stat:FindFirstChild("Ping")
+            return pingStat and pingStat:GetValue() or nil
+        end)
+        if ok and type(ms) == "number" and ms > 0 then return ms end
+        return nil
+    end
     local antiBaitTargetAnimIds = {
         ["rbxassetid://95802026624883"]=true,
         ["rbxassetid://96959123077498"]=true,
@@ -668,6 +688,69 @@ local success, err = pcall(function()
     local fullbrightActive = false
     local originalLighting = {}
 
+    -- ============================================================
+    -- PERFORMANCE CORE — cached rosters + adaptive FPS monitor
+    -- ============================================================
+    -- Why: the game itself is CPU heavy. Several systems below were each
+    -- calling kf:GetChildren()/sf:GetChildren() independently, every single
+    -- RenderStepped/Heartbeat frame — that's a fresh table allocation x
+    -- N systems x 60 times a second, just to get a roster that only
+    -- actually changes when a player joins/leaves or a killer spawns/dies.
+    -- Fix: build the roster once, keep it in sync via ChildAdded/ChildRemoved
+    -- (event-driven, near-zero cost), and have every hot loop below read
+    -- the cached array instead of re-scanning the folder.
+    local PerfCore = { fps = 60, avgFrameTime = 1/60, lowPerfMode = false }
+    svc.Run.RenderStepped:Connect(function(dt)
+        if not dt or dt <= 0 then return end
+        PerfCore.avgFrameTime = PerfCore.avgFrameTime * 0.9 + dt * 0.1
+        PerfCore.fps = 1 / PerfCore.avgFrameTime
+        PerfCore.lowPerfMode = PerfCore.fps < 24
+    end)
+
+    local killerRosterSet, killerRosterArr = {}, {}
+    local survivorRosterSet, survivorRosterArr = {}, {}
+    local function rebuildKillerRoster()
+        killerRosterArr = {}
+        for m in pairs(killerRosterSet) do if m.Parent then table.insert(killerRosterArr, m) end end
+    end
+    local function rebuildSurvivorRoster()
+        survivorRosterArr = {}
+        for m in pairs(survivorRosterSet) do if m.Parent then table.insert(survivorRosterArr, m) end end
+    end
+    local function getCachedKillers() return killerRosterArr end
+    local function getCachedSurvivors() return survivorRosterArr end
+    task.spawn(function()
+        local kf = getKF()
+        while not kf do task.wait(0.5); kf = getKF() end
+        for _, m in ipairs(kf:GetChildren()) do if m:IsA("Model") then killerRosterSet[m]=true end end
+        rebuildKillerRoster()
+        kf.ChildAdded:Connect(function(m) if m:IsA("Model") then killerRosterSet[m]=true; rebuildKillerRoster() end end)
+        kf.ChildRemoved:Connect(function(m) if killerRosterSet[m] then killerRosterSet[m]=nil; rebuildKillerRoster() end end)
+    end)
+    task.spawn(function()
+        local sf = getTeamFolder("Survivors")
+        while not sf do task.wait(0.5); sf = getTeamFolder("Survivors") end
+        for _, m in ipairs(sf:GetChildren()) do if m:IsA("Model") then survivorRosterSet[m]=true end end
+        rebuildSurvivorRoster()
+        sf.ChildAdded:Connect(function(m) if m:IsA("Model") then survivorRosterSet[m]=true; rebuildSurvivorRoster() end end)
+        sf.ChildRemoved:Connect(function(m) if survivorRosterSet[m] then survivorRosterSet[m]=nil; rebuildSurvivorRoster() end end)
+    end)
+
+    -- Reusable RaycastParams — avoids allocating a new params object + new
+    -- exclude table on every single LOS check (this ran multiple times a
+    -- frame per nearby player under AutoBlock/Backstab/KillerAim).
+    local sharedRayParams = RaycastParams.new()
+    sharedRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    sharedRayParams.IgnoreWater = true
+    local sharedExcludeBuf = {}
+    local function rayExcluding(origin, direction, inst1, inst2)
+        table.clear(sharedExcludeBuf)
+        if inst1 then sharedExcludeBuf[#sharedExcludeBuf+1] = inst1 end
+        if inst2 then sharedExcludeBuf[#sharedExcludeBuf+1] = inst2 end
+        sharedRayParams.FilterDescendantsInstances = sharedExcludeBuf
+        return svc.WS:Raycast(origin, direction, sharedRayParams)
+    end
+
     -- Cached UI refs
     local cachedABGui = lp:FindFirstChildOfClass("PlayerGui")
     local cachedBlockBtn, cachedCooldown, cachedChargeBtn, cachedCloneBtn = nil,nil,nil,nil
@@ -705,14 +788,8 @@ local success, err = pcall(function()
         local myChar = lp.Character
         local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
         if not myRoot or not targetPart then return true end
-        local rp = RaycastParams.new()
-        rp.FilterType = Enum.RaycastFilterType.Exclude
-        local excl = {myChar}
         local km = targetPart:FindFirstAncestorOfClass("Model")
-        if km then table.insert(excl, km) end
-        rp.FilterDescendantsInstances = excl
-        rp.IgnoreWater = true
-        return svc.WS:Raycast(myRoot.Position, targetPart.Position - myRoot.Position, rp) == nil
+        return rayExcluding(myRoot.Position, targetPart.Position - myRoot.Position, myChar, km) == nil
     end
     local function isFacingAB(localRoot, targetRoot)
         if not facingCheckEnabled then return true end
@@ -759,10 +836,9 @@ local success, err = pcall(function()
         local myChar = lp.Character
         local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
         if not myRoot then return nil end
-        local kf = getKF(); if not kf then return nil end
         local closest, closestDist = nil, math.huge
-        for _, k in ipairs(kf:GetChildren()) do
-            if k and k:IsA("Model") then
+        for _, k in ipairs(getCachedKillers()) do
+            if k and k.Parent then
                 local hrp = k:FindFirstChild("HumanoidRootPart")
                 if hrp then
                     local d = (hrp.Position - myRoot.Position).Magnitude
@@ -773,11 +849,11 @@ local success, err = pcall(function()
         return closest
     end
 
-    -- Killer state tracker (for prediction)
+    -- Killer state tracker (for prediction) — reads cached roster, no
+    -- per-frame GetChildren allocation
     svc.Run.RenderStepped:Connect(function(dt)
         if dt <= 0 then return end
-        local kf = getKF(); if not kf then return end
-        for _, killer in ipairs(kf:GetChildren()) do
+        for _, killer in ipairs(getCachedKillers()) do
             if killer and killer.Parent then
                 local hrp = killer:FindFirstChild("HumanoidRootPart")
                 if hrp then
@@ -828,8 +904,9 @@ local success, err = pcall(function()
         end
     end)
 
-    -- Detection circles
+    -- Detection circles + facing visuals
     local detectionCircles = {}
+    local facingVisuals = {}
     local function addKillerCircle(killer)
         if not killer:FindFirstChild("HumanoidRootPart") or detectionCircles[killer] then return end
         local hrp = killer.HumanoidRootPart
@@ -843,23 +920,6 @@ local success, err = pcall(function()
     local function removeKillerCircle(killer)
         if detectionCircles[killer] then detectionCircles[killer]:Destroy(); detectionCircles[killer]=nil end
     end
-    svc.Run.RenderStepped:Connect(function()
-        local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-        for killer, circle in pairs(detectionCircles) do
-            if circle and circle.Parent and killer:FindFirstChild("HumanoidRootPart") then
-                circle.Radius = detectionRange
-                if myRoot then
-                    local dist = (killer.HumanoidRootPart.Position - myRoot.Position).Magnitude
-                    circle.Color3 = (dist<=detectionRange) and Color3.fromRGB(255,165,0) or Color3.fromRGB(255,255,0)
-                end
-            else
-                removeKillerCircle(killer)
-            end
-        end
-    end)
-
-    -- Facing visuals
-    local facingVisuals = {}
     local function updateFacingVisual(killer, visual)
         if not (killer and visual and visual.Parent) then return end
         local hrp = killer:FindFirstChild("HumanoidRootPart"); if not hrp then return end
@@ -885,7 +945,23 @@ local success, err = pcall(function()
         local v = facingVisuals[killer]
         if v then v:Destroy(); facingVisuals[killer]=nil end
     end
+    -- Single consolidated pass: both visual systems only ever touch killers
+    -- that have an active adornment, so one RenderStepped connection covers
+    -- both instead of two separate pairs() scans every frame.
     svc.Run.RenderStepped:Connect(function()
+        if not killerCirclesVisible and not facingVisualOn then return end
+        local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        for killer, circle in pairs(detectionCircles) do
+            if circle and circle.Parent and killer:FindFirstChild("HumanoidRootPart") then
+                circle.Radius = detectionRange
+                if myRoot then
+                    local dist = (killer.HumanoidRootPart.Position - myRoot.Position).Magnitude
+                    circle.Color3 = (dist<=detectionRange) and Color3.fromRGB(255,165,0) or Color3.fromRGB(255,255,0)
+                end
+            else
+                removeKillerCircle(killer)
+            end
+        end
         for killer, visual in pairs(facingVisuals) do
             if not killer.Parent or not killer:FindFirstChild("HumanoidRootPart") then removeFacingVisual(killer)
             else updateFacingVisual(killer, visual) end
@@ -1205,23 +1281,20 @@ local success, err = pcall(function()
 
         -- Predictive block
         if predictiveBlockOn and now > predictiveCooldown then
-            local kf = getKF()
-            if kf then
-                local inRange = false
-                for _, killer in ipairs(kf:GetChildren()) do
-                    local hrp = killer:FindFirstChild("HumanoidRootPart")
-                    if hrp and (myRoot.Position-hrp.Position).Magnitude <= detectionRange and hasLOS(hrp) then
-                        inRange = true; break
-                    end
+            local inRange = false
+            for _, killer in ipairs(getCachedKillers()) do
+                local hrp = killer:FindFirstChild("HumanoidRootPart")
+                if hrp and (myRoot.Position-hrp.Position).Magnitude <= detectionRange and hasLOS(hrp) then
+                    inRange = true; break
                 end
-                if inRange then
-                    if not killerInRangeSince then killerInRangeSince = now
-                    elseif now - killerInRangeSince >= edgeKillerDelay then
-                        fireRemoteBlock(); predictiveCooldown = now + 2; killerInRangeSince = nil
-                    end
-                else
-                    killerInRangeSince = nil
+            end
+            if inRange then
+                if not killerInRangeSince then killerInRangeSince = now
+                elseif now - killerInRangeSince >= edgeKillerDelay then
+                    fireRemoteBlock(); predictiveCooldown = now + 2; killerInRangeSince = nil
                 end
+            else
+                killerInRangeSince = nil
             end
         end
     end)
@@ -1264,7 +1337,31 @@ local success, err = pcall(function()
                     if killerModel and hrp then
                         local killerHrp = killerModel:FindFirstChild("HumanoidRootPart")
                         if killerHrp then
-                            local steppedCF = hrp.CFrame:Lerp(killerHrp.CFrame * CFrame.new(0,0,behindstuds), math.clamp(tpSpeed/60,0,1))
+                            -- frame-rate independent dt (hook cadence varies with
+                            -- game load, not a fixed 60Hz — measure it directly)
+                            local now = os.clock()
+                            local dt = math.clamp(now - lastAntiBaitTick, 1/240, 0.25)
+                            lastAntiBaitTick = now
+
+                            -- lead the killer forward by ping + buffer using their
+                            -- tracked velocity, so the spoof lands where they will
+                            -- be by the time the server sees it, not where they
+                            -- were when we computed it
+                            local pingMs = antiBaitAutoPing and (getLivePingMs() or antiBaitManualPingMs) or antiBaitManualPingMs
+                            local leadTime = math.clamp((pingMs + antiBaitExtraBufferMs) / 1000, 0.03, 0.35)
+                            local st = killerState[killerModel]
+                            local killerVel = (st and st.vel) or killerHrp.AssemblyLinearVelocity or Vector3.new()
+                            local predictedPos = killerHrp.Position + Vector3.new(killerVel.X, 0, killerVel.Z) * leadTime
+                            local predictedCF = CFrame.new(predictedPos, predictedPos + killerHrp.CFrame.LookVector)
+                            local targetCF = predictedCF * CFrame.new(0, 0, behindstuds)
+
+                            -- exponential smoothing, rate constant instead of a
+                            -- fixed /60 division — converges at the same real
+                            -- speed no matter how often this hook actually fires
+                            local rate = math.clamp(tpSpeed, 1, 100) / 10
+                            local alpha = math.clamp(1 - math.exp(-rate * dt), 0, 1)
+                            local steppedCF = hrp.CFrame:Lerp(targetCF, alpha)
+
                             if moredirectrn then
                                 pcall(function() args[1] = CharRepMod.Serialize(hrp.CFrame * CFrame.new(0,-90000,0), hrp.AssemblyLinearVelocity) end)
                             elseif moredirectend then
@@ -2070,10 +2167,9 @@ local success, err = pcall(function()
     local function getElliotTarget()
         local char=lp.Character;local myHRP=char and char:FindFirstChild("HumanoidRootPart")
         if not char or not myHRP then return nil,nil end
-        local kf=getTeamFolder("Killers");if not kf then return nil,nil end
         local bestModel,bestHRP,bestScore=nil,nil,math.huge
-        for _,model in ipairs(kf:GetChildren()) do
-            if model:IsA("Model") and model~=char then
+        for _,model in ipairs(getCachedKillers()) do
+            if model~=char then
                 local hrp=model:FindFirstChild("HumanoidRootPart");local hum=model:FindFirstChildOfClass("Humanoid")
                 if hrp and hum and hum.Health>0 then
                     local d=(hrp.Position-myHRP.Position).Magnitude
@@ -2134,8 +2230,7 @@ local success, err = pcall(function()
         return hrp and (hrp.Position-Vector3.new(0,2.2,0)) or nil
     end
     local function killerAimHasLOS(kHRP,tHRP,kChar,tChar)
-        local p=RaycastParams.new();p.FilterType=Enum.RaycastFilterType.Exclude;p.FilterDescendantsInstances={kChar,tChar}
-        return svc.WS:Raycast(kHRP.Position+Vector3.new(0,1.5,0),tHRP.Position-kHRP.Position-Vector3.new(0,1.5,0),p)==nil
+        return rayExcluding(kHRP.Position+Vector3.new(0,1.5,0), tHRP.Position-kHRP.Position-Vector3.new(0,1.5,0), kChar, tChar)==nil
     end
     local function killerAimStop()
         if killerAim.conn then pcall(function() killerAim.conn:Disconnect() end);killerAim.conn=nil end
@@ -2177,10 +2272,9 @@ local success, err = pcall(function()
                     killerAim.camActive=false
                 end
             else
-                local sf=getTeamFolder("Survivors");if not sf then return end
                 local candidates={}
-                for _,model in ipairs(sf:GetChildren()) do
-                    if model~=char and model:IsA("Model") then
+                for _,model in ipairs(getCachedSurvivors()) do
+                    if model~=char then
                         local r=model:FindFirstChild("HumanoidRootPart");local h=model:FindFirstChildOfClass("Humanoid")
                         if r and h and h.Health>0 then
                             local d=(r.Position-hrp.Position).Magnitude
@@ -2324,9 +2418,8 @@ local success, err = pcall(function()
         if isDaggerOnCooldown() then return end
         local char=lp.Character;local myHRP=char and char:FindFirstChild("HumanoidRootPart")
         if not char or not myHRP then return end
-        local kf=getTeamFolder("Killers");if not kf then return end
-        for _,killer in ipairs(kf:GetChildren()) do
-            if killer:IsA("Model") and killer~=char then
+        for _,killer in ipairs(getCachedKillers()) do
+            if killer~=char then
                 local kHRP=killer:FindFirstChild("HumanoidRootPart");local kHum=killer:FindFirstChildOfClass("Humanoid")
                 if kHRP and kHum and kHum.Health>0 then
                     local dist=(kHRP.Position-myHRP.Position).Magnitude
@@ -2334,8 +2427,7 @@ local success, err = pcall(function()
                         local dot=(myHRP.Position-kHRP.Position).Unit:Dot(-kHRP.CFrame.LookVector)
                         if dot>=math.cos(math.rad(tt.coneAngle/2)) then
                             if tt.checkObstacles then
-                                local rp=RaycastParams.new();rp.FilterType=Enum.RaycastFilterType.Exclude;rp.FilterDescendantsInstances={char,killer}
-                                if svc.WS:Raycast(myHRP.Position,kHRP.Position-myHRP.Position,rp) then continue end
+                                if rayExcluding(myHRP.Position, kHRP.Position-myHRP.Position, char, killer) then continue end
                             end
                             executeBackstab(killer);break
                         end
@@ -2575,6 +2667,11 @@ local success, err = pcall(function()
     Controls.antiBait=UIFramework.Toggle.new({Text="Anti Bait (Position Spoof)",Icon="target",Value=false,Parent=tabAntiB,OnChange=function(v) antiBaitEnabled=v end})
     Controls.antiBaitBehind=UIFramework.Slider.new({Text="Behind Studs",Icon="move",Min=1,Max=10,Step=1,Value=behindstuds,Parent=tabAntiB,OnChange=function(v) behindstuds=tonumber(v) or 4 end})
     Controls.antiBaitSpeed=UIFramework.Slider.new({Text="Slide Speed (1-60)",Icon="wind",Min=1,Max=60,Step=1,Value=math.min(55,60),Parent=tabAntiB,OnChange=function(v) tpSpeed=tonumber(v) or 55 end})
+    addSection(tabAntiB, "Ping Compensation")
+    tabAntiB:Paragraph({Title="Why this matters",Desc="At 70-100ms ping the killer moves before your spoof reaches the server. This leads the killer forward using their tracked velocity so the spoof lands where they'll actually be.",Image="wifi",ImageSize=18})
+    Controls.antiBaitAutoPing=UIFramework.Toggle.new({Text="Auto-Detect Ping",Icon="wifi",Value=antiBaitAutoPing,Parent=tabAntiB,OnChange=function(v) antiBaitAutoPing=v end})
+    Controls.antiBaitManualPing=UIFramework.Slider.new({Text="Manual Ping (ms, used if auto fails/off)",Icon="clock",Min=0,Max=250,Step=5,Value=antiBaitManualPingMs,Parent=tabAntiB,OnChange=function(v) antiBaitManualPingMs=tonumber(v) or 80 end})
+    Controls.antiBaitBuffer=UIFramework.Slider.new({Text="Extra Jitter Buffer (ms)",Icon="shield",Min=0,Max=100,Step=5,Value=antiBaitExtraBufferMs,Parent=tabAntiB,OnChange=function(v) antiBaitExtraBufferMs=tonumber(v) or 20 end})
     addSection(tabAntiB, "Direct Modes")
     Controls.moredirectrn=UIFramework.Toggle.new({Text="Underground Spoof (Y -90000)",Icon="arrow-down",Value=false,Parent=tabAntiB,OnChange=function(v) moredirectrn=v; if v then moredirectend=false; setElementValue(Controls.moredirectend,false) end end})
     Controls.moredirectend=UIFramework.Toggle.new({Text="Reset Position (Direct End)",Icon="refresh",Value=false,Parent=tabAntiB,OnChange=function(v) moredirectend=v; if v then moredirectrn=false; setElementValue(Controls.moredirectrn,false) end end})
@@ -2651,15 +2748,6 @@ local success, err = pcall(function()
                 end
             end
             notify("Misc","FPS boost applied","zap",2)
-        end)
-    end})
-    UIFramework.Button.new({Text="Clear AntiFlick Parts Cache",Icon="trash-2",Variant="secondary",Parent=tabMisc,OnClick=function()
-        pcall(function()
-            for _,v in ipairs(svc.WS:GetChildren()) do
-                if v:IsA("Part") and v.Name=="AntiFlickZone" then v:Destroy() end
-            end
-            if gcinfo then pcall(function() collectgarbage("collect") end) end
-            notify("Misc","Cache cleared","trash-2",2)
         end)
     end})
     addSection(tabMisc, "Fake Lag Tech")
